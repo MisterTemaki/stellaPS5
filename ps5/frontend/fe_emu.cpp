@@ -260,8 +260,6 @@ constexpr size_t kRewindBytes = 192u * 1024 * 1024;
 // a console button pressed from the pause menu (Game Reset, Pause...): held this many frames (games read the
 // buttons once a frame or less)
 constexpr int kPressFrames = 8;
-// the biggest game a core takes: Stella's biggest cartridge is 512 KiB, a 7800 or Lynx game is up to 1 MiB (+ header)
-constexpr uint64_t kMaxRom = fe::kMaxRomAny;
 // the Lynx boot ROM Gearlynx needs (/data/stella/bios/lynxboot.img), and its size
 constexpr const char* kLynxBios = "lynxboot.img";
 constexpr long kLynxBiosSize = 512;
@@ -1112,6 +1110,18 @@ bool LoadGame(const std::string& path, std::string* error)
 		g.rom.clear();
 		return false;
 	};
+	// a game file bigger than any of its system's (its name's system; for a .bin or .rom whose system isn't known,
+	// bigger than any game of the four)
+	const auto too_big_fail = [&](const std::string& name, uint64_t size) {
+		fe::System s;
+		bool ambiguous = false;
+		const bool known = fe::SystemForExt(ExtOf(name), &s, &ambiguous) && !ambiguous;
+		OrbisLog("[emu] could not start %s: %s is %llu bytes, over %llu%s%s", path.c_str(), name.c_str(),
+			(unsigned long long)size, (unsigned long long)fe::MaxRomSizeFor(name), known ? " for the " : "",
+			known ? fe::Info(s).name : "");
+		return known ? fail(Fmt(fe::T("%s is larger than any %s game."), file.c_str(), fe::T(fe::Info(s).name)))
+					 : fail(Fmt(fe::T("%s is too big for a game of these consoles."), file.c_str()));
+	};
 	if (!g.kept_rom.empty() && g.kept_rom_path == path)
 	{
 		// a power cycle: the game read a moment ago, not read again (from a share)
@@ -1124,26 +1134,32 @@ bool LoadGame(const std::string& path, std::string* error)
 	else if (fe::IsArchiveExt(ext))
 	{
 		std::string why;
-		if (!fe::ReadFromArchive(path, &inner, &g.rom, &why))
+		uint64_t too_big_size = 0;
+		if (!fe::ReadFromArchive(path, &inner, &g.rom, &why, nullptr, nullptr, &too_big_size))
 		{
+			if (too_big_size)
+				return too_big_fail(inner, too_big_size);
 			OrbisLog("[emu] could not start %s: %s", path.c_str(), why.empty() ? "no game inside the archive" : why.c_str());
 			return fail(why.empty() ? Fmt(fe::T("There is no game inside %s."), file.c_str())
 									: Fmt(fe::T("Stella PS5 could not unpack %s."), file.c_str()) + " " + fe::T(why.c_str()));
 		}
 	}
-	else if (!ReadFile(path, g.rom, kMaxRom, &too_big) || g.rom.empty())
+	else if (!ReadFile(path, g.rom, fe::MaxRomSizeFor(file), &too_big) || g.rom.empty())
 	{
-		OrbisLog("[emu] could not start %s: %s", path.c_str(), too_big ? "too big for a game" : "can't read it");
-		return fail(too_big ? Fmt(fe::T("%s is too big for a game of these consoles."), file.c_str())
-							: Fmt(fe::T("Stella PS5 could not read %s."), file.c_str()));
+		if (too_big)
+			return too_big_fail(file, FileSize(path));
+		OrbisLog("[emu] could not start %s: can't read it", path.c_str());
+		return fail(Fmt(fe::T("Stella PS5 could not read %s."), file.c_str()));
 	}
 	g.inner = inner;
 	const std::string game_file = inner.empty() ? file : inner.substr(inner.find_last_of('/') + 1);
 	g.system = fe::SystemOfRom(path, game_file, g.rom);
-	if (g.system == fe::System::A2600 && g.rom.size() > 512u * 1024)
+	// each system's own limit, the same as for the archives and the naming (fe::MaxRomSize)
+	if (g.rom.size() > fe::MaxRomSize(g.system))
 	{
-		OrbisLog("[emu] could not start %s: %zu bytes, bigger than Stella's 512 KiB", path.c_str(), g.rom.size());
-		return fail(Fmt(fe::T("%s is too big for an Atari 2600 cartridge (512 KiB at most)."), file.c_str()));
+		OrbisLog("[emu] could not start %s: %zu bytes, over %llu for the %s", path.c_str(), g.rom.size(),
+			(unsigned long long)fe::MaxRomSize(g.system), fe::Info(g.system).name);
+		return fail(Fmt(fe::T("%s is larger than any %s game."), file.c_str(), fe::T(fe::Info(g.system).name)));
 	}
 	// the Lynx needs its boot ROM (Gearlynx shows a "no BIOS" screen without it): said before it starts
 	if (g.system == fe::System::Lynx && FileSize(g.sys_dir + "/" + kLynxBios) != kLynxBiosSize)

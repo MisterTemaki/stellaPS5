@@ -61,7 +61,8 @@ NetfsFileView netfs_file_shares()
 	{
 		if (!l.ok)
 		{
-			v.invalid++;
+			if (v.invalid++ == 0)
+				v.first_invalid = "shares.txt line " + std::to_string(l.line) + ": " + l.error;
 			continue;
 		}
 		NetfsFileShare s;

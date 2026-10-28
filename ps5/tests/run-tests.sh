@@ -236,7 +236,7 @@ expect "waitfor $T/root/logs/installer.log 'listening on 127.0.0.1'" "the instal
 expect "cmp -s $APP/sce_sys/icon0.png app/sce_sys/icon0.png" "icon0.png installed (the Stella PS5 icon)"
 expect "cmp -s $APP/sce_sys/pic0.dds app/sce_sys/pic0.dds && cmp -s $APP/sce_sys/pic1.dds app/sce_sys/pic1.dds && cmp -s $APP/sce_sys/param.json app/sce_sys/param.json" "pic0.dds/pic1.dds (background) and param.json installed"
 expect "cmp -s $APP/eboot.bin tests/fake-eboot.bin" "eboot.bin installed"
-expect "python3 tests/check_art.py app/sce_sys" "pic0.dds/pic1.dds: 3840x2160 BC7 (DX10, one mip), the key art background-source.png encoded (PSNR > 40 dB)"
+expect "python3 tests/check_art.py app/sce_sys" "the art: pic0.dds/pic1.dds 3840x2160 BC7 (DX10, one mip), the key art encoded (PSNR > 40 dB); icon0.png a 512x512 8-bit RGB PNG, the chosen icon (icon-source.png)"
 expect "cmp -s $APP/sce_module/libc.prx tests/fake-libc.prx" "sce_module/libc.prx installed"
 expect "cmp -s $APP/licenses/COPYING.txt ../COPYING && cmp -s $APP/licenses/LGPL-2.1.txt app/licenses/LGPL-2.1.txt && cmp -s $APP/licenses/NOTICES.txt app/licenses/NOTICES.txt" "licenses/ installed (COPYING.txt = the GPL 3, LGPL-2.1.txt, NOTICES.txt)"
 python3 tools/make_notices.py .. "$T/notices" >/dev/null
@@ -942,10 +942,7 @@ rc=$(STELLAPS5_HOST_QUIT_AFTER=3 run "$T" "0:0" "" "$T/root/roms/test.a26")
 expect "grep -q 'running \"test\" (Atari 2600), 50.0' $T/root/logs/boot.log" "TV format PAL: an NTSC game at 50 Hz"
 fi
 
-if want 28; then
-echo "== 28. languages: English by default; Spanish, Portuguese (Brazil), French and German translated"
-expect "python3 $PWD/tests/check_i18n.py $PWD/frontend/fe_i18n.cpp >/dev/null" "every translation has its five languages and the English format specifiers"
-L2RIGHT=$(printf %x $((0x$L2 | 0x$RIGHT)))
+# what a run showed untranslated (STELLAPS5_HOST_I18N_MISSING), less the names that stay as they are (groups 28, 38)
 NAMES_PY="names = {'Alpha (USA)', 'Alpha', 'Gamma (World)', 'Gamma', 'Atari 2600', 'Atari 5200', 'Atari 7800', 'Atari Lynx',
          'A26', 'O', 'L1', 'R1', 'R3', 'OPTIONS', 'Touchpad', 'Cross', 'Circle', 'Square', 'Triangle', 'None', 'A', 'B',
          'English', 'Español', 'Português (Brasil)', 'Français', 'Deutsch', 'S-Video', 'RGB', '4:3', '16:9', 'z26',
@@ -972,6 +969,10 @@ for line in (open(sys.argv[1], encoding='utf-8') if os.path.exists(sys.argv[1]) 
     print(t)
 PY
 }
+if want 28; then
+echo "== 28. languages: English by default; Spanish, Portuguese (Brazil), French and German translated"
+expect "python3 $PWD/tests/check_i18n.py $PWD/frontend/fe_i18n.cpp >/dev/null" "every translation has its five languages and the English format specifiers"
+L2RIGHT=$(printf %x $((0x$L2 | 0x$RIGHT)))
 for L in 1 2 3 4; do
 	T=$(newroot t28_$L)
 	echo "language=$L" >>"$T/root/stella-ps5.ini"
@@ -1027,7 +1028,7 @@ done
 for L in 1 2 3 4; do
 	T=$(newroot t28net_$L)
 	echo "language=$L" >>"$T/root/stella-ps5.ini"
-	echo "smb://10.0.0.5/games" >"$T/root/shares.txt"
+	printf 'smb://10.0.0.5/games\nsmb://10.0.0.5:99999/games2\n' >"$T/root/shares.txt"
 	$ROM "$T/root/roms/Alpha (USA).a26" >/dev/null
 	key() { pad="$pad;$f:$1;$((f + 2)):0"; f=$((f + ${2:-6})); } # one press, then the next one $2 flips later
 	pad="0:0;20:$TRIANGLE;22:0"; f=30
@@ -1040,7 +1041,7 @@ for L in 1 2 3 4; do
 	rm -f $T/missing.txt
 	rc=$(STELLAPS5_HOST_REALTIME=1 STELLAPS5_HOST_NETFS_DIR=$T/nothing STELLAPS5_HOST_I18N_MISSING=$T/missing.txt run "$T" "$pad" "")
 	untranslated $T/missing.txt > $T/untranslated.txt
-	expect "[ $rc = 0 ] && grep -q 'network tab: scan again' $T/root/logs/boot.log && [ -s $T/missing.txt ] && [ ! -s $T/untranslated.txt ]" "language $L: the network screens and the Network tab are translated ($(head -c 200 $T/untranslated.txt | tr '\n' '|'))"
+	expect "[ $rc = 0 ] && grep -q 'network tab: scan again' $T/root/logs/boot.log && grep -q 'shares.txt: 1 line(s) not valid, the first: shares.txt line 2: the port must be a number from 1 to 65535' $T/root/logs/boot.log && [ -s $T/missing.txt ] && [ ! -s $T/untranslated.txt ]" "language $L: the network screens, the Network tab and what is wrong with a shares.txt line are translated ($(head -c 200 $T/untranslated.txt | tr '\n' '|'))"
 	nosan "$T"
 done
 # Settings, Language (first row of SYSTEM: Up four times from Shader: Back, Updates, Debug logs, Language), Right: Spanish
@@ -1410,10 +1411,11 @@ rc=$(run "$T" "0:0;$(SHELFQUIT_AT 60)" "")
 expect "[ $rc = 0 ] && grep -q '\[games\] 5 ROM(s)' $T/root/logs/boot.log" "the shelf lists the five archives with a game in a readable directory"
 expect "! grep -q 'other.7z \[\|nogame.7z \[\|empty.7z \[\|truncated.7z \[\|aeshdr.7z \[' $T/root/logs/boot.log" "an archive with nothing the app lists, with no game, a cut or name-encrypted one: not listed"
 nosan "$T"
-for f in bzip2:"can't unpack" aes:"is encrypted" big:"too big" corrupt:"damaged"; do
+for f in bzip2:"can't unpack" aes:"is encrypted" big:"is 614400 bytes, over 524288 for the Atari 2600" corrupt:"damaged"; do
 	n=${f%%:*}; why=${f#*:}
 	rc=$(MAXFLIPS=300 run "$T" "0:0;60:$CROSS;62:0" "50" "$T/root/roms/$n.7z")
 	expect "grep -q \"could not start .*$n.7z: .*$why\" $T/root/logs/boot.log && [ -f $T/dump/flip00050.ppm ]" "$n.7z: not started; the screen says why ($why)"
+	[ $n = big ] && expect "grep -q '\[ui\] message: big.7z is larger than any Atari 2600 game.' $T/root/logs/boot.log" "big.7z (a 600 KiB .a26 inside): the screen says it is larger than any Atari 2600 game"
 	nosan "$T"
 done
 # d. a .7z on a share: listed before it is opened (its folder's name), named by its CRC in the background, started from the share
@@ -1517,16 +1519,18 @@ SRV=$T/srv; mkdir -p "$SRV" "$T/appmeta/PPSA99927"; echo old >"$T/appmeta/PPSA99
 SPORT=$((18000 + RANDOM % 1900))
 (cd "$SRV" && exec python3 -m http.server $SPORT --bind 127.0.0.1 >/dev/null 2>&1) &
 # the release: the installed app with a new eboot, a newer param.json, a new file; the old manifest lists a file that goes
-release() { # tag contentVersion [bad]
+release() { # tag contentVersion [bad|nodigest]
 	rm -rf "$T/rel" && mkdir -p "$T/rel" && cp -r "$T/homebrew/PPSA99927" "$T/rel/PPSA99927" && rm -f "$T/rel/PPSA99927/manifest.sha256" "$T/rel/PPSA99927/sce_sys/old.bin"
 	echo "eboot $1" >"$T/rel/PPSA99927/eboot.bin"; echo "new art" >"$T/rel/PPSA99927/sce_sys/icon0.png"; echo extra >"$T/rel/PPSA99927/sce_sys/extra.bin"; echo "notices $1" >>"$T/rel/PPSA99927/licenses/NOTICES.txt"
 	sed -i "s/\"contentVersion\": \"[0-9.]*\"/\"contentVersion\": \"$2\"/" "$T/rel/PPSA99927/sce_sys/param.json"
 	python3 tools/make_release_zip.py "$T/rel/PPSA99927" PPSA99927 "$SRV/StellaPS5-$1-PPSA99927.zip" >/dev/null
 	local sha size
 	sha=$(sha256sum "$SRV/StellaPS5-$1-PPSA99927.zip" | cut -c1-64); size=$(stat -c %s "$SRV/StellaPS5-$1-PPSA99927.zip")
-	[ -n "${3:-}" ] && sha=0000${sha:4}
-	printf '{"tag_name":"%s","name":"Stella PS5 %s","assets":[{"name":"StellaPS5-%s.elf","size":1,"browser_download_url":"http://127.0.0.1:%s/x.elf"},{"name":"StellaPS5-%s-PPSA99927.zip","size":%s,"digest":"sha256:%s","browser_download_url":"http://127.0.0.1:%s/StellaPS5-%s-PPSA99927.zip"}]}' \
-		"$1" "$1" "$1" $SPORT "$1" $size $sha $SPORT "$1" >"$SRV/latest.json"
+	[ "${3:-}" = bad ] && sha=0000${sha:4}
+	local digest="\"digest\":\"sha256:$sha\","
+	[ "${3:-}" = nodigest ] && digest=""
+	printf '{"tag_name":"%s","name":"Stella PS5 %s","assets":[{"name":"StellaPS5-%s.elf","size":1,"browser_download_url":"http://127.0.0.1:%s/x.elf"},{"name":"StellaPS5-%s-PPSA99927.zip","size":%s,%s"browser_download_url":"http://127.0.0.1:%s/StellaPS5-%s-PPSA99927.zip"}]}' \
+		"$1" "$1" "$1" $SPORT "$1" $size "$digest" $SPORT "$1" >"$SRV/latest.json"
 }
 # the app installed by the payload (1.0), which then stays as the helper; the updater asks the test server
 STELLAPS5_UPDATE_API=http://127.0.0.1:$SPORT/latest.json STELLAPS5_ROOT=$T/root STELLAPS5_HOMEBREW=$T/homebrew STELLAPS5_APPMETA=$T/appmeta \
@@ -1568,7 +1572,9 @@ STELLAPS5_UPDATE_API=http://127.0.0.1:$SPORT/latest.json STELLAPS5_ROOT=$T2/root
 	ASAN_OPTIONS=detect_leaks=0 timeout 120 "$INSTALLER" >"$T2/inst.txt" 2>&1 &
 waitfor $T2/root/logs/installer.log 'listening on 127.0.0.1'
 $ROM "$T2/root/roms/test.a26" >/dev/null
-rc=$(STELLAPS5_HOST_REALTIME=1 STELLAPS5_APPMETA=$T2/appmeta run "$T2" "0:0;30:$TRIANGLE;32:0;40:$UP;42:0;46:$UP;48:0;56:$CROSS;58:0;150:$CROSS;152:0;$(SHELFQUIT_AT 300)" "54,140")
+# (the script waits for the states, not a number of flips: the check's answer before Cross on Install, the end of
+# the install before Cross on Installed: restart)
+rc=$(STELLAPS5_HOST_PAD_GATE="55:$T2/root/logs/boot.log:the helper's state: available 9.9;149:$T2/root/logs/boot.log:[update] 9.9 installed" STELLAPS5_HOST_REALTIME=1 STELLAPS5_APPMETA=$T2/appmeta run "$T2" "0:0;30:$TRIANGLE;32:0;40:$UP;42:0;46:$UP;48:0;56:$CROSS;58:0;150:$CROSS;152:0;$(SHELFQUIT_AT 300)" "54,140")
 expect "grep -q 'daily check asked of the helper' $T2/root/logs/boot.log && [ -f $T2/root/update-check.txt ]" "at start: the daily check asked of the helper"
 expect "grep -q 'update install' $T2/root/logs/installer.log && grep -q 'eboot v9.9' $T2/homebrew/PPSA99927/eboot.bin" "Cross on \"Install 9.9\": the helper installs it"
 expect "grep -q 'is available: Settings, SYSTEM, Updates' $T2/inst.txt $T2/root/logs/installer.log" "the daily check found 9.9: a notification says so"
@@ -1581,6 +1587,24 @@ expect "[ $rc = 0 ] && grep -q \"\[update\] after the update to 9.9 (in $T2/home
 printf '1.0\n/x\n0\n' >$T2/root/update-pending.txt
 rc=$(run "$T2" "0:0;$(SHELFQUIT_AT 60)" "")
 expect "[ $rc = 0 ] && grep -q 'this is 1.0: the new version runs' $T2/root/logs/boot.log && grep -q 'Stella PS5 updated to 1.0.' $T2/out.txt && [ ! -e $T2/root/update-pending.txt ]" "an update seen running: said once, the note gone"
+stop38
+# a release whose zip GitHub gives no SHA-256 for (no "digest"): refused before anything is downloaded (as Media Player
+# Classic PS5 1.5); the app shows why, translated (German here: no text left untranslated)
+T3=$(newroot t38c)
+release v9.9 99.000.000 nodigest
+(cd "$SRV" && exec python3 -m http.server $SPORT --bind 127.0.0.1 >/dev/null 2>&1) &
+STELLAPS5_UPDATE_API=http://127.0.0.1:$SPORT/latest.json STELLAPS5_ROOT=$T3/root STELLAPS5_HOMEBREW=$T3/homebrew STELLAPS5_APPMETA=$T3/appmeta \
+	ASAN_OPTIONS=detect_leaks=0 timeout 120 "$INSTALLER" >"$T3/inst.txt" 2>&1 &
+waitfor $T3/root/logs/installer.log 'listening on 127.0.0.1'
+expect "$UPD check 1.0 --until available,failed | grep -q '^available|9.9|'" "a release without a SHA-256 from GitHub: found (9.9)"
+expect "$UPD install 1.0 --until done,failed | grep -q \"^failed|.*GitHub gave no SHA-256 for the download, so it can't be checked: nothing was changed\"" "... refused: GitHub gave no SHA-256, so it can't be checked"
+expect "! grep -q 'downloading http' $T3/root/logs/installer.log && grep -q '\"contentVersion\": \"01.000.000\"' $T3/homebrew/PPSA99927/sce_sys/param.json" "... before anything is downloaded; nothing changed"
+echo "language=4" >>"$T3/root/stella-ps5.ini"; date +%s >"$T3/root/update-check.txt"
+$ROM "$T3/root/roms/test.a26" >/dev/null
+rc=$(STELLAPS5_HOST_I18N_MISSING=$T3/missing.txt run "$T3" "0:0;30:$TRIANGLE;32:0;40:$UP;42:0;46:$UP;48:0;100:$CIRCLE;102:0;$(SHELFQUIT_AT 140)" "90")
+untranslated $T3/missing.txt > $T3/untranslated.txt
+expect "[ $rc = 0 ] && grep -q \"the helper's state: failed\" $T3/root/logs/boot.log && ! grep -q 'SHA-256' $T3/missing.txt && [ ! -s $T3/untranslated.txt ]" "the app (German) shows why, translated ($(head -c 200 $T3/untranslated.txt | tr '\n' '|'))"
+nosan "$T3"
 stop38
 fi
 
@@ -1647,7 +1671,7 @@ helper39 STELLAPS5_HOST_MOUNTS="$IMNT"
 expect "$UPD check 1.0 --until available,failed | grep -q '^available|9.9|' && $UPD install 1.0 --until done,failed | grep -q '^failed|.*image that ShadowMount+ mounted'" "the helper: an image ShadowMount+ mounted can't take the update: refused"
 expect "sums $I | cmp -s - $T/img.sums && ! grep -q 'GET .*\.zip' $T/root/logs/helper.log" "... nothing downloaded, nothing written"
 $ROM "$T/root/roms/test.a26" >/dev/null
-rc=$(STELLAPS5_HOST_REALTIME=1 STELLAPS5_SYSTEM_EX=$SX STELLAPS5_SHADOWMNT=$M/shadowmnt STELLAPS5_USER_APP=$M/userapp STELLAPS5_HOST_MOUNTS="$IMNT" run "$T" "0:0;30:$TRIANGLE;32:0;40:$UP;42:0;46:$UP;48:0;56:$CROSS;58:0;100:$CROSS;102:0;120:$CIRCLE;122:0;$(SHELFQUIT_AT 200)" "90")
+rc=$(STELLAPS5_HOST_PAD_GATE="55:$T/root/logs/boot.log:the helper's state: available 9.9" STELLAPS5_HOST_REALTIME=1 STELLAPS5_SYSTEM_EX=$SX STELLAPS5_SHADOWMNT=$M/shadowmnt STELLAPS5_USER_APP=$M/userapp STELLAPS5_HOST_MOUNTS="$IMNT" run "$T" "0:0;30:$TRIANGLE;32:0;40:$UP;42:0;46:$UP;48:0;56:$CROSS;58:0;100:$CROSS;102:0;120:$CIRCLE;122:0;$(SHELFQUIT_AT 200)" "90")
 expect "[ $rc = 0 ] && grep -q '\[ui\] message: Stella PS5 9.9 is available (you have 1.0).' $T/root/logs/boot.log && grep -q 'This copy runs from an image that ShadowMount+ mounted ($I)' $T/root/logs/boot.log" "the app: Updates says the image can't take it, before anything is downloaded"
 expect "grep -q '9.9 is available, but it can.t be installed here' $T/root/logs/boot.log && sums $I | cmp -s - $T/img.sums" "... and nothing was written"
 nosan "$T"
@@ -1669,7 +1693,7 @@ expect "grep -q 'runs from an image that ShadowMount+ mounted ($I): an update ca
 sleep 0.5
 rm -f $T/root/logs/boot.log
 helper39 STELLAPS5_HOST_MOUNTS="$SX/app/PPSA99927|nullfs|$I|rw;$M/shadowmnt/img1|exfatfs|/dev/da1s1|ro" STELLAPS5_SHADOWMNT=$M/no-images
-rc=$(STELLAPS5_HOST_REALTIME=1 STELLAPS5_SYSTEM_EX=$SX STELLAPS5_SHADOWMNT=$M/no-images STELLAPS5_USER_APP=$M/userapp STELLAPS5_HOST_MOUNTS="$SX/app/PPSA99927|nullfs|$I|rw;$M/shadowmnt/img1|exfatfs|/dev/da1s1|ro" run "$T" "0:0;30:$TRIANGLE;32:0;40:$UP;42:0;46:$UP;48:0;56:$CROSS;58:0;160:$CROSS;162:0;200:$CROSS;202:0;220:$CIRCLE;222:0;$(SHELFQUIT_AT 300)" "")
+rc=$(STELLAPS5_HOST_PAD_GATE="159:$T/root/logs/boot.log:the helper's state: available 9.9" STELLAPS5_HOST_REALTIME=1 STELLAPS5_SYSTEM_EX=$SX STELLAPS5_SHADOWMNT=$M/no-images STELLAPS5_USER_APP=$M/userapp STELLAPS5_HOST_MOUNTS="$SX/app/PPSA99927|nullfs|$I|rw;$M/shadowmnt/img1|exfatfs|/dev/da1s1|ro" run "$T" "0:0;30:$TRIANGLE;32:0;40:$UP;42:0;46:$UP;48:0;56:$CROSS;58:0;160:$CROSS;162:0;200:$CROSS;202:0;220:$CIRCLE;222:0;$(SHELFQUIT_AT 300)" "")
 expect "grep -q \"This copy runs from $I, where the app can't write\" $T/root/logs/boot.log && sums $I | cmp -s - $T/img.sums" "a read-only folder: said before downloading, nothing written"
 cp $T/root/logs/boot.log $T/boot-e.log
 stop39
@@ -1812,7 +1836,7 @@ nosan "$T"
 fi
 
 if want 43; then
-echo "== 43. the biggest games: 512 KiB Lynx and 7800 cartridges with their headers, from a folder, a zip and a 7z"
+echo "== 43. the biggest games: 512 KiB Lynx, 7800 (with their headers) and 5200 cartridges, from a folder, a zip and a 7z; one byte more refused"
 T=$(newroot t43)
 mkdir -p "$T/root/roms/AtariLynx" "$T/root/bios" && head -c 512 /dev/zero >"$T/root/bios/lynxboot.img"
 python3 - "$T/big.lnx" "$T/silver.a78" <<'PY'
@@ -1837,6 +1861,22 @@ nosan "$T"
 rc=$(MAXFLIPS=200 run "$T" "0:0" "" "$T/root/roms/silver.7z")
 expect "grep -q 'loading .*silver.7z -> Silver.a78 (524416 bytes) as an Atari 7800 game' $T/root/logs/boot.log" "the 7-Zipped 512 KiB 7800 cartridge starts"
 nosan "$T"
+# the 5200: a5200 takes carts up to 512 KiB (Bosconian's size); one byte more is bigger than any 5200 game, said so
+# (not "could not unpack") from a zip, a 7z or a folder
+mkdir -p "$T/big5200"
+python3 -c "import sys; open(sys.argv[1],'wb').write(bytes(512 * 1024)); open(sys.argv[2],'wb').write(bytes(512 * 1024 + 1))" "$T/big5200/Big.a52" "$T/big5200/Over.a52"
+python3 -c "import zipfile,sys; z=zipfile.ZipFile(sys.argv[1],'w',zipfile.ZIP_DEFLATED); z.write(sys.argv[2],'Big.a52'); z.close()" "$T/root/roms/big5200.zip" "$T/big5200/Big.a52"
+python3 -c "import zipfile,sys; z=zipfile.ZipFile(sys.argv[1],'w',zipfile.ZIP_DEFLATED); z.write(sys.argv[2],'Over.a52'); z.close()" "$T/root/roms/over5200.zip" "$T/big5200/Over.a52"
+python3 -c "import py7zr,sys; z=py7zr.SevenZipFile(sys.argv[1],'w'); z.write(sys.argv[2],'Over.a52'); z.close()" "$T/root/roms/over5200.7z" "$T/big5200/Over.a52"
+cp "$T/big5200/Over.a52" "$T/root/roms/Over5200.a52"
+rc=$(MAXFLIPS=200 run "$T" "0:0" "" "$T/root/roms/big5200.zip")
+expect "grep -q 'loading .*big5200.zip -> Big.a52 (524288 bytes) as an Atari 5200 game (a5200)' $T/root/logs/boot.log && grep -q 'running .* (Atari 5200)' $T/root/logs/boot.log" "a zipped 512 KiB 5200 cartridge starts (a5200)"
+nosan "$T"
+for f in over5200.zip over5200.7z Over5200.a52; do
+	rc=$(MAXFLIPS=120 run "$T" "0:0" "" "$T/root/roms/$f")
+	expect "grep -q 'could not start .*$f: .* is 524289 bytes, over 524288 for the Atari 5200' $T/root/logs/boot.log && ! grep -q 'could not unpack\\|could not be read' $T/root/logs/boot.log" "$f (512 KiB + 1 byte): bigger than any Atari 5200 game, said so"
+	nosan "$T"
+done
 fi
 
 if want 44; then

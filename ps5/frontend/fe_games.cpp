@@ -655,7 +655,7 @@ const char* SevenZipWhy(sevenzip::Status st)
 			return "It is packed with a method Stella PS5 can't unpack (LZMA, LZMA2 and PPMd work), or its names are encrypted.";
 		case sevenzip::Status::Encrypted: return "The archive is encrypted.";
 		case sevenzip::Status::TooBig:
-			return "The game, or the solid block it is packed in, is too big (2 MiB for a game, 64 MiB for a block).";
+			return "The archive is too big to unpack: a solid block over 64 MiB, or more than 65,536 files.";
 		case sevenzip::Status::ReadError: return "The file could not be read.";
 		case sevenzip::Status::NoMemory: return "There is not enough memory to unpack it.";
 		default: return "The archive is damaged, or it is not a 7z archive.";
@@ -700,10 +700,12 @@ bool ArchiveSystem(const std::string& path, System* out, const std::atomic<bool>
 }
 
 bool ReadFromArchive(const std::string& path, std::string* inner, std::vector<uint8_t>* data, std::string* why,
-	const std::atomic<bool>* cancel, bool* certain)
+	const std::atomic<bool>* cancel, bool* certain, uint64_t* too_big)
 {
 	if (certain)
 		*certain = false;
+	if (too_big)
+		*too_big = 0;
 	if (ExtOf(path) == ".7z")
 	{
 		sevenzip::Archive a;
@@ -719,6 +721,19 @@ bool ReadFromArchive(const std::string& path, std::string* inner, std::vector<ui
 				return false; // no game inside: the caller says so
 			}
 			*inner = a.Entries()[size_t(i)].name;
+			const uint64_t size = a.Entries()[size_t(i)].size;
+			if (size > MaxRomSizeFor(*inner))
+			{
+				// bigger than any game of its system: said as that, not as an archive that can't be unpacked
+				OrbisLog("[games] %s -> %s: %llu bytes, over %llu for its system", path.c_str(), inner->c_str(),
+					(unsigned long long)size, (unsigned long long)MaxRomSizeFor(*inner));
+				if (too_big)
+					*too_big = size;
+				if (certain)
+					*certain = true;
+				data->clear();
+				return false;
+			}
 			st = a.Extract(size_t(i), data, MaxRomSizeFor(*inner));
 			if (st == sevenzip::Status::Ok && data->empty())
 				st = sevenzip::Status::Broken;
@@ -752,8 +767,21 @@ bool ReadFromArchive(const std::string& path, std::string* inner, std::vector<ui
 	if (ok)
 	{
 		unz_file_info info;
-		ok = unzGetCurrentFileInfo(z, &info, nullptr, 0, nullptr, 0, nullptr, 0) == UNZ_OK &&
-			 info.uncompressed_size > 0 && info.uncompressed_size <= MaxRomSizeFor(*inner) && unzOpenCurrentFile(z) == UNZ_OK;
+		ok = unzGetCurrentFileInfo(z, &info, nullptr, 0, nullptr, 0, nullptr, 0) == UNZ_OK && info.uncompressed_size > 0;
+		if (ok && info.uncompressed_size > MaxRomSizeFor(*inner))
+		{
+			// bigger than any game of its system: said as that, not as a file that can't be read
+			OrbisLog("[games] %s -> %s: %lu bytes, over %llu for its system", path.c_str(), inner->c_str(),
+				(unsigned long)info.uncompressed_size, (unsigned long long)MaxRomSizeFor(*inner));
+			if (too_big)
+				*too_big = info.uncompressed_size;
+			if (certain)
+				*certain = true;
+			unzClose(z);
+			data->clear();
+			return false;
+		}
+		ok = ok && unzOpenCurrentFile(z) == UNZ_OK;
 		if (ok)
 		{
 			data->resize(info.uncompressed_size);
@@ -895,7 +923,7 @@ uint64_t MaxRomSize(System s)
 	switch (s)
 	{
 		case System::A2600: return 512u * 1024;
-		case System::A5200: return 128u * 1024;
+		case System::A5200: return 512u * 1024;
 		default: return 2u * 1024 * 1024 + 1024;
 	}
 }

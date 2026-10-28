@@ -95,7 +95,8 @@ struct NetfsFileView
 {
 	std::string error; // one sentence when the file cannot be used ("" = fine)
 	std::vector<NetfsFileShare> shares;
-	int invalid = 0;   // lines that are not valid addresses (netfs_notices says which; they are left alone)
+	int invalid = 0;   // lines that are not valid addresses (they are left alone)
+	std::string first_invalid; // the first one's line and what is wrong ("shares.txt line 3: bad host name")
 };
 NetfsFileView netfs_file_shares();
 // Saves `cfg` over the share that was shown at `line` (its mount point, `old_mount_point`, must still be there),

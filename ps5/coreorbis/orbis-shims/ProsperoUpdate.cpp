@@ -459,6 +459,8 @@ void* CheckMain(void*)
 	return nullptr;
 }
 
+static const char* const kNoDigest = "GitHub gave no SHA-256 for the download, so it can't be checked: nothing was changed.";
+
 void* InstallMain(void*)
 {
 	Release r;
@@ -471,10 +473,20 @@ void* InstallMain(void*)
 	}
 	g_bytes = 0;
 	std::vector<uint8_t> zip;
-	OrbisLog("[update] downloading %s", r.zip_url.c_str());
-	const int status = g_fetch(r.zip_url, zip, size_t(std::max<uint64_t>(r.size, 1) + (1u << 20)), &g_bytes);
 	std::string why;
-	if (status != 200)
+	int status = 0;
+	// GitHub gives every release file's SHA-256 ("digest"): a release without one can't be checked, so it isn't
+	// downloaded at all (as Media Player Classic PS5 1.5)
+	if (r.sha256.size() != 64)
+		why = kNoDigest;
+	else
+	{
+		OrbisLog("[update] downloading %s", r.zip_url.c_str());
+		status = g_fetch(r.zip_url, zip, size_t(std::max<uint64_t>(r.size, 1) + (1u << 20)), &g_bytes);
+	}
+	if (!why.empty())
+		;
+	else if (status != 200)
 		why = status < 0 ? "The download failed (network)." : "The download failed (HTTP " + std::to_string(status) + ").";
 	else if (r.size && zip.size() != r.size)
 		why = "The download is " + std::to_string(zip.size()) + " bytes, not " + std::to_string(r.size) + ".";
@@ -843,12 +855,11 @@ std::string InstallZip(const std::vector<uint8_t>& zip, const std::string& expec
 			return "An earlier update isn't finished being put back: nothing was installed. Send the payload again to "
 				   "repair the app, then try again.";
 	}
-	if (!expect_sha256.empty())
-	{
-		const std::string got = Sha256Hex(zip.data(), zip.size());
-		if (got != expect_sha256)
-			return "The download's SHA-256 doesn't match GitHub's: nothing was changed.";
-	}
+	// GitHub gives every release file's SHA-256 ("digest"); a download it can't be checked against isn't installed
+	if (expect_sha256.size() != 64)
+		return kNoDigest;
+	if (Sha256Hex(zip.data(), zip.size()) != expect_sha256)
+		return "The download's SHA-256 doesn't match GitHub's: nothing was changed.";
 	std::vector<ZipEntry> entries;
 	std::string why = ReadZip(zip, entries);
 	if (!why.empty())

@@ -87,10 +87,11 @@ struct GameInfo
 // for a .bin or .rom, the folders of path, else the game tables (data: the ROM, by its CRC), else the 2600.
 System SystemOfRom(const std::string& path, const std::string& name, const std::vector<uint8_t>& data);
 
-// The biggest game file of each system the app takes (from a folder, a .zip or a .7z), header included, with room to
-// spare: the 2600 Stella's biggest cartridge (512 KiB, Cartridge::maxSize()), the 5200 128 KiB (its carts are 40 KiB
-// at most), the 7800 and the Lynx 2 MiB (512 KiB carts are 524,416 bytes as .a78, 524,352 as .lnx). kMaxRomAny: the
-// biggest of them, for a .bin or .rom whose system isn't known yet.
+// The biggest game file of each system the app takes (from a folder, a .zip or a .7z, and for naming by CRC), header
+// included: the 2600 Stella's biggest cartridge (512 KiB, Cartridge::maxSize()), the 5200 a5200's biggest (512 KiB:
+// it takes 4 to 512 KiB carts, emu/cartridge.c, Bosconian's 512 KiB among them), the 7800 and the Lynx 2 MiB, with
+// room to spare (512 KiB carts are 524,416 bytes as .a78, 524,352 as .lnx). kMaxRomAny: the biggest of them, for a
+// .bin or .rom whose system isn't known yet (its system's own limit applies once it is known).
 uint64_t MaxRomSize(System s);
 constexpr uint64_t kMaxRomAny = 2u * 1024 * 1024 + 1024;
 // The limit for a file of this name (its extension's system; kMaxRomAny when the extension is shared)
@@ -148,12 +149,13 @@ bool IsArchiveExt(const std::string& ext);
 // The system of a .zip or .7z: the extension of the first game inside. False if none.
 // cancel: stops the read (a .7z's); certain: as for RomCrc32.
 bool ArchiveSystem(const std::string& path, System* out, const std::atomic<bool>* cancel = nullptr, bool* certain = nullptr);
-// The first game inside a .zip or .7z (its name in the archive) and its bytes (512 KiB at most: Stella's biggest). False if none can be
-// read; *why (when given) then says why in a sentence for the player (English: T() it), for an archive that can't be
-// read, or a .7z that is damaged, encrypted, packed with a method the app can't unpack, or too big. Left alone when
-// there is simply no game inside.
+// The first game inside a .zip or .7z (its name in the archive) and its bytes (MaxRomSizeFor its name at most). False
+// if none can be read; *why (when given) then says why in a sentence for the player (English: T() it), for an archive
+// that can't be read, or a .7z that is damaged, encrypted, packed with a method the app can't unpack, or too big to
+// unpack. Left alone when there is simply no game inside, or when the game is bigger than any of its system's: then
+// *too_big (when given) is its size.
 bool ReadFromArchive(const std::string& path, std::string* inner, std::vector<uint8_t>* data, std::string* why = nullptr,
-	const std::atomic<bool>* cancel = nullptr, bool* certain = nullptr);
+	const std::atomic<bool>* cancel = nullptr, bool* certain = nullptr, uint64_t* too_big = nullptr);
 
 // Every ROM under the ROM folders (sub-folders included, 4 levels), sorted by title. Names that need a
 // CRC or an MD5 are resolved here too, with a cache (/data/stella/covers/crc-cache.txt) so each ROM is read once.

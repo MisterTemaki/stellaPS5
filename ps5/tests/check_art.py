@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-# The home-screen background: pic0.dds and pic1.dds are the same file, a 3840x2160 BC7_UNORM DX10 DDS with one mip
-# level (the header the home screen takes), and decode to the key art, background-source.png (PSNR over 40 dB).
+# The home-screen art: pic0.dds and pic1.dds are the same file, a 3840x2160 BC7_UNORM DX10 DDS with one mip level
+# (the header the home screen takes), and decode to the key art, background-source.png (PSNR over 40 dB); icon0.png
+# is a 512x512 8-bit RGB PNG, the same file as icon-source.png (the icon chosen for the project).
 #   check_art.py <sce_sys dir>
 # SPDX-License-Identifier: MIT
 import os
@@ -29,6 +30,17 @@ if not problems:
     print('pic0.dds against background-source.png: PSNR %.1f dB' % psnr)
     if psnr < 40:
         problems.append('pic0.dds is not background-source.png (PSNR %.1f dB): run make art' % psnr)
+# the icon: the project's art, a 512x512 8-bit RGB(A) PNG, icon0.png the same file as icon-source.png
+icon = open(os.path.join(d, 'icon0.png'), 'rb').read()
+if icon[:8] != b'\x89PNG\r\n\x1a\n' or icon[12:16] != b'IHDR':
+    problems.append('icon0.png is not a PNG')
+else:
+    iw, ih = struct.unpack_from('>II', icon, 16)
+    depth, color = icon[24], icon[25]
+    if (iw, ih, depth) != (512, 512, 8) or color not in (2, 6):
+        problems.append('icon0.png is %dx%d, %d-bit, color type %d (512x512 8-bit RGB wanted)' % (iw, ih, depth, color))
+if icon != open(os.path.join(d, 'icon-source.png'), 'rb').read():
+    problems.append('icon0.png differs from icon-source.png')
 for p in problems:
     print(p)
 sys.exit(1 if problems else 0)

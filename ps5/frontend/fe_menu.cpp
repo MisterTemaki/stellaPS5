@@ -379,7 +379,11 @@ void PollUpdate(bool force)
 		return;
 	g_upd.polled = Now();
 	std::string reply;
+	const update::Phase before = g_upd.st.phase;
 	g_upd.helper = jailbreak::UpdateRequest("status", reply) && update::Decode(reply, g_upd.st);
+	if (g_upd.helper && g_upd.st.phase != before)
+		OrbisLog("[update] the helper's state: %s%s%s", update::PhaseName(g_upd.st.phase), g_upd.st.latest.empty() ? "" : " ",
+			g_upd.st.latest.c_str());
 	if (g_upd.helper && g_upd.st.phase == update::Phase::Done && !g_upd.noted)
 	{
 		g_upd.noted = true;
@@ -694,7 +698,8 @@ void SettingsScreen(bool over_game)
 		else if (id < S_COUNT && *SettingHelp(id))
 			help = SettingHelp(id);
 		if (help)
-			DrawHelpLines(T(help), bottom + 12, help_color);
+			// the helper's own messages (an update that failed, and why) through the network/update templates
+			DrawHelpLines(help == g_upd.st.error.c_str() ? TNet(help) : std::string(T(help)), bottom + 12, help_color);
 		Present();
 		const Nav n = nav.Read();
 		if (n.up || n.down)

@@ -83,11 +83,11 @@ std::vector<std::string> Wrap(const std::string& text, int scale, int max_px, si
 	return lines;
 }
 
-void DrawNote(const std::string& text, uint32_t color)
+void DrawNote(const std::string& text, uint32_t color, bool translated = false)
 {
 	int y = H - 150;
 	// netfs's messages (the form's checks, the test's result, why a share is down) in the chosen language
-	for (const std::string& l : Wrap(TNet(text), 3, W - 160, 2))
+	for (const std::string& l : Wrap(translated ? text : TNet(text), 3, W - 160, 2))
 	{
 		DrawText(80, y, l.c_str(), 3, color, false);
 		y += 36;
@@ -399,6 +399,8 @@ void NetworkMenu()
 {
 	NavReader nav;
 	NetfsFileView view = netfs_file_shares();
+	if (view.invalid > 0)
+		OrbisLog("[net] shares.txt: %d line(s) not valid, the first: %s", view.invalid, view.first_invalid.c_str());
 	int sel = 0;
 	std::string note;
 	for (;;)
@@ -448,7 +450,8 @@ void NetworkMenu()
 				T(view.invalid == 1 ? "%d line of shares.txt is not a valid address and is skipped."
 									: "%d lines of shares.txt are not valid addresses and are skipped."),
 				int(view.invalid));
-			DrawNote(text, kDim);
+			// and what is wrong with the first one (shares.txt line 3: the port must be a number...)
+			DrawNote(std::string(text) + " " + TNet(view.first_invalid), kDim, true);
 		}
 		Footer((std::string(icon::Cross) + " " + T("Open") + "     " + icon::Circle + " " + T("Back")).c_str());
 		Present();

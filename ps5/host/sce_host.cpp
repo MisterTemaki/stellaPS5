@@ -10,6 +10,9 @@
 //   STELLAPS5_HOST_DUMP_DIR=dir                                  where (default .)
 //   STELLAPS5_HOST_MAX_FLIPS=n                                   abort after n flips (a hang guard)
 //   STELLAPS5_HOST_REALTIME=1                                    flips wait 1/60 s
+//   STELLAPS5_HOST_PAD_GATE="flip:file:text[;...]"               the pads' scripts stop at that flip of theirs until
+//                                                                the file holds the text (a state to wait for, not a
+//                                                                number of flips: an install's end...)
 //   STELLAPS5_HOST_AUDIO_DUMP=file                               the sound played, raw 48 kHz stereo s16
 //
 // SPDX-License-Identifier: MIT
@@ -35,6 +38,63 @@ namespace
 SceVideoOutBuffers g_bufs[2];
 int g_w = 0, g_h = 0;
 std::atomic<uint64_t> g_flips{0};
+// the pads' scripts' clock: the flips, but held at STELLAPS5_HOST_PAD_GATE's flip until its file holds its text
+std::atomic<uint64_t> g_script_flips{0};
+
+bool GateHolds(uint64_t script_now)
+{
+	struct Gate
+	{
+		uint64_t at = 0;
+		std::string file, text;
+		bool opened = false;
+	};
+	static std::vector<Gate> gates = [] {
+		std::vector<Gate> v;
+		if (const char* s = getenv("STELLAPS5_HOST_PAD_GATE"))
+		{
+			std::string all = s;
+			size_t p = 0;
+			while (p <= all.size())
+			{
+				size_t e = all.find(';', p);
+				if (e == std::string::npos)
+					e = all.size();
+				const std::string item = all.substr(p, e - p);
+				const size_t a = item.find(':'), b = a == std::string::npos ? a : item.find(':', a + 1);
+				if (b != std::string::npos)
+				{
+					Gate g;
+					g.at = strtoull(item.substr(0, a).c_str(), nullptr, 10);
+					g.file = item.substr(a + 1, b - a - 1);
+					g.text = item.substr(b + 1);
+					v.push_back(g);
+				}
+				p = e + 1;
+			}
+		}
+		return v;
+	}();
+	for (Gate& gate : gates)
+	{
+		if (gate.opened || script_now != gate.at)
+			continue;
+		bool found = false;
+		if (FILE* f = fopen(gate.file.c_str(), "rb"))
+		{
+			std::string s(1 << 20, '\0');
+			s.resize(fread(&s[0], 1, s.size(), f));
+			fclose(f);
+			found = s.find(gate.text) != std::string::npos;
+		}
+		if (!found)
+			return true;
+		gate.opened = true;
+		fprintf(stderr, "[host] pad gate at flip %llu: open after %llu flips\n", (unsigned long long)gate.at,
+			(unsigned long long)g_flips.load());
+	}
+	return false;
+}
 std::atomic<uint64_t> g_audio_frames{0};
 // a step of a pad's script: its buttons, and its sticks (0..255, 128 = the centre)
 struct PadStep
@@ -302,6 +362,8 @@ int sceVideoOutRegisterBuffers2(int, int, int, SceVideoOutBuffers* buffers, int 
 int sceVideoOutSubmitFlip(int, int idx, uint32_t, int64_t)
 {
 	const uint64_t n = g_flips.fetch_add(1);
+	if (!GateHolds(g_script_flips.load()))
+		g_script_flips.fetch_add(1);
 	if (g_dumps.count(n))
 		Dump(idx, n);
 	if (const char* m = getenv("STELLAPS5_HOST_MAX_FLIPS"))
@@ -441,7 +503,7 @@ int scePadReadState(int handle, ScePadData* data)
 	data->connected = 1;
 	data->leftStick.x = data->leftStick.y = 128;
 	data->rightStick.x = data->rightStick.y = 128;
-	const uint64_t now = g_flips.load();
+	const uint64_t now = g_script_flips.load();
 	auto it = g_script[pad].upper_bound(now);
 	if (it != g_script[pad].begin())
 	{
