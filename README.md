@@ -1,5 +1,7 @@
 # Stella PS5
 
+[![Stella for PS5](ps5/docs/banner.jpg)](ps5/app/sce_sys/background-source.png)
+
 [Stella](https://stella-emu.github.io/) -- the Atari 2600 emulator -- running on a jailbroken PS5 as a **native
 home-screen app** with its own icon and background, on the 3D game shelf of NES FCEUmm PS5. The same app also plays
 the Atari 5200, the Atari 7800 and the Atari Lynx, each with its own core:
@@ -33,7 +35,7 @@ repository's first commit has it, apart from this README (Stella's own is [READM
 drives the cores through their libretro interface and plays the part RetroArch plays on a PC.
 
 > **Status (1.0):** builds with the ps5-payload-dev SDK into a signed native app (`eboot.bin`) and its payload, and
-> passes 541 host tests (with netfs's 235 checks, the 7z reader's 43, the NFS backend's and the tabs' unit tests), which
+> passes 542 host tests (with netfs's 235 checks, the 7z reader's 43, the NFS backend's and the tabs' unit tests), which
 > run the same code -- the four cores included -- on Linux
 > with the PS5 calls simulated: test programs written for this port (a 2600 game that shows on screen which inputs
 > and switches it sees, a 5200, a 7800 and a Lynx program) are played through the whole chain -- the shelf, the pad,
@@ -218,11 +220,13 @@ the helper is already running only installs and exits. (The updater does the sam
   sce_sys/pic1.dds       the launch background (the same image)
 ```
 
-The icon and the background are this project's own art, drawn by `ps5/tools/make_art.py` (`make art`): a ribbed
-black and walnut woodgrain front, as consoles of the late 1970s had, with a generic one-button joystick and a blank
-cartridge (and, on the background, a keypad controller and a handheld for the other systems). No logo, trademark or
-artwork of a real product is used. `pic0.dds`/`pic1.dds` are encoded as BC7 with bc7enc_rdo, as
-ps5-native-app-boilerplate's `tools/prepare-assets.sh --background` does.
+The background -- the large image behind the icon when Stella PS5 is selected on the home screen, and the launch
+screen -- is the project's key art, chosen by its author: `ps5/app/sce_sys/background-source.png` (3840x2160),
+encoded to `pic0.dds`/`pic1.dds` as BC7 by `ps5/tools/make_art.py` (bc7enc_rdo, as ps5-native-app-boilerplate's
+`tools/prepare-assets.sh --background` does; `make art BC7ENC=<bc7enc>`). The icon (`icon0.png`, 512x512, from
+`icon-source.png`) is drawn by the same script (`make icon`): a ribbed black and walnut woodgrain front, as consoles
+of the late 1970s had, with a generic one-button joystick and a blank cartridge. To change the background, replace
+`background-source.png` (16:9) and run `make art`; the script only reads it.
 
 **Home-screen art:** ShadowMountPlus copies the art in `sce_sys` to `/user/appmeta/PPSA99927/` when it registers the
 title. The installer keeps that folder current on every update; if the title was registered before the art changed,
@@ -472,7 +476,7 @@ make ps5 -j$(nproc)              # build/ps5/StellaPS5.elf (installer + helper, 
 make send PS5_HOST=192.168.0.10  # sends it to elfldr (port 9021)
 make dist                        # build/dist/StellaPS5-v<version>.elf, StellaPS5-v<version>-PPSA99927.zip, the source zip
 make app                         # only build/app/PPSA99927/, to copy by hand
-make test                        # Linux builds (app, installer, helper) + the 541 host tests (ASan/UBSan), with netfs's,
+make test                        # Linux builds (app, installer, helper) + the 542 host tests (ASan/UBSan), with netfs's,
                                  # the NFS backend's, the tabs' and the 7z reader's unit tests
 ```
 
@@ -495,7 +499,8 @@ make test                        # Linux builds (app, installer, helper) + the 5
   eboot define one name.
 - `eboot.bin` is a PIE linked against the SDK's stubs and static libc++, then `ps5-native-tool link` and
   `self --sign`, exactly like PS5SX2's `link-vk.sh`; `libc.prx` goes with it.
-- `tools/make_gamedb.py` makes `frontend/data/nointro.tsv` from libretro-database; `tools/make_art.py` the art;
+- `tools/make_gamedb.py` makes `frontend/data/nointro.tsv` from libretro-database; `tools/make_art.py` the home-screen
+  background's DDS files from the key art (`make art`) and the icon (`make icon`);
   `tools/make_notices.py` (`make notices`) the app's `licenses/` folder (`app/licenses/`, committed), which the
   payload installs and the release zip carries.
 - **The source zip** (`make dist`) is `git archive` of the committed tree (`HEAD`: make it from the release's tagged
@@ -550,12 +555,12 @@ licences and notices in `licenses/` (`COPYING.txt`, `LGPL-2.1.txt`, `NOTICES.txt
 - **stb_image / stb_image_resize2 / stb_truetype** (Sean Barrett): public domain or MIT.
 - **UI fonts**, the same as PS5SX2's, in `ps5/frontend/assets/fonts/` with their licenses: Roboto Regular (Apache 2.0),
   PromptFont (SIL OFL 1.1), Font Awesome Brands (SIL OFL 1.1, icons CC BY 4.0).
-- **Icon, background and the no-cover emblems:** drawn for this project (`ps5/tools/make_art.py`,
-  `ps5/frontend/fe_covers.cpp`). Atari, the Atari 2600, 5200, 7800 and Lynx are trademarks of their owners;
-  PlayStation and PS5 are trademarks of Sony Interactive Entertainment; this port is not affiliated with or endorsed
-  by either, nor by the Stella team.
+- **Background:** the project's key art, chosen by its author (`ps5/app/sce_sys/background-source.png`,
+  `ps5/docs/banner.jpg`). **Icon and the no-cover emblems:** drawn for this project (`ps5/tools/make_art.py`,
+  `ps5/frontend/fe_covers.cpp`). Atari, the Fuji logo, Video Computer System, the Atari 2600, 5200, 7800 and Lynx,
+  and the designs of the consoles and their boxes are trademarks of their owners (Atari Interactive); PlayStation and
+  PS5 are trademarks of Sony Interactive Entertainment; this port is not affiliated with or endorsed by any of them,
+  nor by the Stella team.
 - **Covers:** [libretro-thumbnails](https://github.com/libretro-thumbnails), downloaded on the console, not included.
   **Names and CRCs:** [libretro-database](https://github.com/libretro/libretro-database) (No-Intro).
 - **Port:** [github.com/MisterTemaki](https://github.com/MisterTemaki).
-
-![Stella PS5](ps5/app/sce_sys/background-source.png)

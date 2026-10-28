@@ -381,12 +381,16 @@ $(APP_OUT)/sce_sys/%.dds: app/sce_sys/%.dds
 	@mkdir -p $(dir $@)
 	cp $< $@
 
-# the art, drawn again from scratch (tools/make_art.py; committed, so only when it changes):
-#   make art BC7ENC=<bc7enc_rdo's bc7enc> [ART_FONT=<a bold .ttf>]
+# the home-screen art (committed, so only when it changes; tools/make_art.py):
+#   make art BC7ENC=<bc7enc_rdo's bc7enc>   pic0.dds / pic1.dds from app/sce_sys/background-source.png (the key art)
+#   make icon [ART_FONT=<a bold .ttf>]      icon-source.png / icon0.png, drawn again
 ART_FONT ?= /usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf
 art:
-	python3 tools/make_art.py app/sce_sys $(ART_FONT) $(BC7ENC) --icon --background
-.PHONY: art
+	@test -n "$(BC7ENC)" || { echo "make art BC7ENC=<path to bc7enc_rdo's bc7enc>"; exit 1; }
+	python3 tools/make_art.py app/sce_sys $(ART_FONT) $(BC7ENC)
+icon:
+	python3 tools/make_art.py app/sce_sys $(ART_FONT) --icon
+.PHONY: art icon
 
 # ---------------- host ----------------
 HOST_CC ?= gcc

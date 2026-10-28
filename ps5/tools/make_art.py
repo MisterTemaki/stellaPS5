@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
-# Stella PS5: the app's home-screen art, drawn from scratch (no logos, no trademarks, no artwork of real products).
-#   make_art.py <sce_sys dir> <font.ttf> [bc7enc] [--icon] [--background]
-#     --icon         icon-source.png (1024x1024) and icon0.png (512x512)
-#     --background   background-source.png (3840x2160)
-#     bc7enc         then pic0.dds / pic1.dds from background-source.png: 3840x2160, BC7 DX10 DDS without mipmaps
-#                    (bc7enc_rdo), with the header the home screen takes (as ps5-native-app-boilerplate's
-#                    tools/prepare-assets.sh writes it)
-# The picture: the late-1970s living-room console look -- a ribbed black top over a walnut woodgrain front -- with a
-# generic one-button joystick and a blank cartridge (and, on the background, a keypad controller and a handheld: the
-# other systems), all drawn here. The font is the caller's ("make art" passes DejaVu Sans Bold).
+# Stella PS5: the app's home-screen art.
+#   make_art.py <sce_sys dir> <font.ttf> [bc7enc] [--icon]
+#     bc7enc   pic0.dds / pic1.dds from background-source.png (the project's key art, chosen by the author; this
+#              script only reads it): 3840x2160, BC7 DX10 DDS without mipmaps (bc7enc_rdo), with the header the
+#              home screen takes (as ps5-native-app-boilerplate's tools/prepare-assets.sh writes it)
+#     --icon   icon-source.png (1024x1024) and icon0.png (512x512), drawn here: the late-1970s living-room console
+#              look -- a ribbed black top over a walnut woodgrain front -- with a generic one-button joystick and a
+#              blank cartridge, and the title in the caller's font ("make icon" passes DejaVu Sans Bold)
 # SPDX-License-Identifier: MIT
 import os
 import shutil
@@ -24,7 +22,6 @@ out, font_path = sys.argv[1], sys.argv[2]
 args = [a for a in sys.argv[3:] if not a.startswith('--')]
 bc7enc = args[0] if args else None
 want_icon = '--icon' in sys.argv
-want_bg = '--background' in sys.argv
 
 ORANGE = (240, 128, 40)
 CREAM = (238, 226, 200)
@@ -138,53 +135,6 @@ def cartridge(layer, cx, base_y, width, angle=0):
     layer.alpha_composite(rot, (int(cx - rot.width / 2), int(base_y - rot.height + pad * 0.6)))
 
 
-def keypad_controller(layer, cx, base_y, size):
-    """A generic keypad controller: a grey body, a small stick on top, twelve keys."""
-    d = ImageDraw.Draw(layer)
-    w, h = size * 0.62, size
-    x0, y0 = cx - w / 2, base_y - h
-    shadow_under(layer, [x0 - w * 0.05, base_y - h * 0.06, x0 + w * 1.1, base_y + h * 0.06], size * 0.03)
-    d = ImageDraw.Draw(layer)
-    d.rounded_rectangle([x0, y0, x0 + w, base_y], radius=w * 0.12, fill=(52, 52, 56, 255), outline=(96, 96, 104, 255),
-                        width=max(2, int(size * 0.008)))
-    d.ellipse([cx - w * 0.2, y0 + h * 0.06, cx + w * 0.2, y0 + h * 0.06 + w * 0.4], fill=(24, 24, 26, 255))
-    d.ellipse([cx - w * 0.08, y0 + h * 0.06 + w * 0.12, cx + w * 0.08, y0 + h * 0.06 + w * 0.28], fill=(70, 70, 76, 255))
-    kw, kh = w * 0.2, h * 0.075
-    for r in range(4):
-        for c in range(3):
-            kx = x0 + w * 0.14 + c * (kw + w * 0.07)
-            ky = y0 + h * 0.42 + r * (kh + h * 0.035)
-            d.rounded_rectangle([kx, ky, kx + kw, ky + kh], radius=kh * 0.3, fill=(196, 190, 176, 255))
-    d.rectangle([x0 - w * 0.06, y0 + h * 0.48, x0, y0 + h * 0.6], fill=ORANGE + (255,))
-    d.rectangle([x0 + w, y0 + h * 0.48, x0 + w * 1.06, y0 + h * 0.6], fill=ORANGE + (255,))
-
-
-def handheld(layer, cx, base_y, size):
-    """A generic wide handheld: a grey body, a screen in the middle, a D-pad on the left, two buttons on the right."""
-    d = ImageDraw.Draw(layer)
-    w, h = size, size * 0.42
-    x0, y0 = cx - w / 2, base_y - h
-    shadow_under(layer, [x0, base_y - h * 0.12, x0 + w, base_y + h * 0.12], size * 0.03)
-    d = ImageDraw.Draw(layer)
-    d.rounded_rectangle([x0, y0, x0 + w, base_y], radius=h * 0.3, fill=(60, 60, 66, 255), outline=(110, 110, 118, 255),
-                        width=max(2, int(size * 0.006)))
-    sx0, sy0, sx1, sy1 = x0 + w * 0.3, y0 + h * 0.16, x0 + w * 0.7, base_y - h * 0.16
-    d.rounded_rectangle([sx0 - w * 0.02, sy0 - h * 0.05, sx1 + w * 0.02, sy1 + h * 0.05], radius=h * 0.06,
-                        fill=(20, 20, 22, 255))
-    g = Image.new('RGBA', (int(sx1 - sx0), int(sy1 - sy0)))
-    gd = ImageDraw.Draw(g)
-    for yy in range(g.height):
-        t = yy / max(1, g.height - 1)
-        gd.line([(0, yy), (g.width, yy)], fill=(int(40 + 60 * t), int(70 + 90 * (1 - t)), int(140 - 40 * t), 255))
-    layer.alpha_composite(g, (int(sx0), int(sy0)))
-    d = ImageDraw.Draw(layer)
-    dx, dy, a = x0 + w * 0.15, (y0 + base_y) / 2, h * 0.12
-    d.rectangle([dx - a * 1.5, dy - a / 2, dx + a * 1.5, dy + a / 2], fill=(24, 24, 26, 255))
-    d.rectangle([dx - a / 2, dy - a * 1.5, dx + a / 2, dy + a * 1.5], fill=(24, 24, 26, 255))
-    for i, (bx, by) in enumerate([(x0 + w * 0.82, dy + h * 0.1), (x0 + w * 0.89, dy - h * 0.1)]):
-        d.ellipse([bx - a * 0.8, by - a * 0.8, bx + a * 0.8, by + a * 0.8], fill=(28, 28, 30, 255))
-
-
 def text_outline(d, xy, s, font, fill, outline, width):
     x, y = xy
     for dx in range(-width, width + 1):
@@ -236,25 +186,11 @@ def icon(size):
     return vignette(im.convert('RGB'), 0.5)
 
 
-def background(w, h):
-    im = console_front(w, h, 0.58).convert('RGBA')
-    layer = Image.new('RGBA', (w, h), (0, 0, 0, 0))
-    # the right half: the home screen's title and buttons sit on the left
-    handheld(layer, w * 0.875, h * 0.75, h * 0.4)
-    keypad_controller(layer, w * 0.715, h * 0.84, h * 0.36)
-    cartridge(layer, w * 0.5, h * 0.85, h * 0.24, 6)
-    joystick(layer, w * 0.615, h * 0.97, h * 0.26)
-    im.alpha_composite(layer)
-    return vignette(im.convert('RGB'), 0.45)
-
-
 os.makedirs(out, exist_ok=True)
 if want_icon:
     ic = icon(1024)
     ic.save(os.path.join(out, 'icon-source.png'))
     ic.resize((512, 512), Image.LANCZOS).save(os.path.join(out, 'icon0.png'))
-if want_bg:
-    background(3840, 2160).save(os.path.join(out, 'background-source.png'))
 if bc7enc:
     bg = Image.open(os.path.join(out, 'background-source.png')).convert('RGB').resize((3840, 2160), Image.LANCZOS)
     tmp = tempfile.mkdtemp()

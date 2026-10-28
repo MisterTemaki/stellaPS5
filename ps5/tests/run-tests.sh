@@ -236,6 +236,7 @@ expect "waitfor $T/root/logs/installer.log 'listening on 127.0.0.1'" "the instal
 expect "cmp -s $APP/sce_sys/icon0.png app/sce_sys/icon0.png" "icon0.png installed (the Stella PS5 icon)"
 expect "cmp -s $APP/sce_sys/pic0.dds app/sce_sys/pic0.dds && cmp -s $APP/sce_sys/pic1.dds app/sce_sys/pic1.dds && cmp -s $APP/sce_sys/param.json app/sce_sys/param.json" "pic0.dds/pic1.dds (background) and param.json installed"
 expect "cmp -s $APP/eboot.bin tests/fake-eboot.bin" "eboot.bin installed"
+expect "python3 tests/check_art.py app/sce_sys" "pic0.dds/pic1.dds: 3840x2160 BC7 (DX10, one mip), the key art background-source.png encoded (PSNR > 40 dB)"
 expect "cmp -s $APP/sce_module/libc.prx tests/fake-libc.prx" "sce_module/libc.prx installed"
 expect "cmp -s $APP/licenses/COPYING.txt ../COPYING && cmp -s $APP/licenses/LGPL-2.1.txt app/licenses/LGPL-2.1.txt && cmp -s $APP/licenses/NOTICES.txt app/licenses/NOTICES.txt" "licenses/ installed (COPYING.txt = the GPL 3, LGPL-2.1.txt, NOTICES.txt)"
 python3 tools/make_notices.py .. "$T/notices" >/dev/null
