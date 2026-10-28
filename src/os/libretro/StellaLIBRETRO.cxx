@@ -122,6 +122,10 @@ void StellaLIBRETRO::destroy()
   audio_samples = 0;
 
   myOSystem.reset();
+
+  // Stella PS5: the cached pointer to the TIA surface went with the OSystem; a second game (or the same one started
+  // again) in the same session would draw from freed memory without this
+  render_surface = nullptr;
 }
 
 // - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
