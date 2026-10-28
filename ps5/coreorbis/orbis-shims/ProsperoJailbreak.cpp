@@ -71,6 +71,10 @@ bool WriteAll(int fd, const void* data, size_t size)
 	return true;
 }
 
+// Our helper took the connection and then didn't answer in 5 s (the unlock request): the request for where the app is
+// isn't sent to it as well (the start would wait 5 s more). Cleared when it answers.
+bool g_helper_silent = false;
+
 // One request to one daemon. 1 = yes, 0 = no answer on that port, -1 = it answered no.
 // strict (our own helper): only a whole reply with our magic and ret 0 counts. The other daemons get PS5SX2's
 // leniency (etaHEN's legacy server can answer without touching ret).
@@ -95,19 +99,29 @@ int Ask(int port, const char* who, bool strict)
 		return 0;
 	}
 	size_t got = 0;
+	bool timed_out = false;
 	while (got < sizeof(req))
 	{
 		const ssize_t n = recv(fd, reinterpret_cast<char*>(&req) + got, sizeof(req) - got, 0);
 		if (n <= 0)
+		{
+			timed_out = n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK);
 			break;
+		}
 		got += size_t(n);
 	}
 	close(fd);
 	req.msg1[sizeof(req.msg1) - 1] = 0;
-	OrbisLog("[jailbreak] %s (port %d): ret %d, %zu bytes back%s%s", who, port, req.ret, got, req.msg1[0] ? ": " : "",
-		req.msg1);
+	if (timed_out)
+		OrbisLog("[jailbreak] %s (port %d): no answer in 5 s (%zu bytes back)", who, port, got);
+	else
+		OrbisLog("[jailbreak] %s (port %d): ret %d, %zu bytes back%s%s", who, port, req.ret, got, req.msg1[0] ? ": " : "",
+			req.msg1);
 	if (strict)
+	{
+		g_helper_silent = timed_out;
 		return got == sizeof(req) && req.magic == kMagic && req.ret == 0 ? 1 : -1;
+	}
 	// PS5SX2 accepts an untouched ret from etaHEN's legacy server too (orbis_try_jailbreak)
 	if (req.ret == 0 || (req.ret == kRetUntouched && got > 0))
 		return 1;
@@ -248,6 +262,80 @@ bool UpdateRequest(const char* what, std::string& reply)
 		return false;
 	req.msg1[sizeof(req.msg1) - 1] = 0;
 	reply = req.msg1;
+	return true;
+}
+
+bool FetchAppPlace(const std::string& title_id, const std::string& default_dir, std::string& text)
+{
+	text.clear();
+#ifdef __PROSPERO__
+	const int port = PortFromEnv("STELLAPS5_HELPER_PORT", kHelperPort);
+#else
+	// the host tests: this one request to another port (none listening there: the app without a helper)
+	const int port = PortFromEnv("STELLAPS5_HOST_APPPLACE_PORT", PortFromEnv("STELLAPS5_HELPER_PORT", kHelperPort));
+#endif
+	if (g_helper_silent)
+	{
+		OrbisLog("[update] the helper on port %d didn't answer the unlock request: not asked where the app is either", port);
+		return false;
+	}
+	const int fd = ConnectLocal(port);
+	if (fd < 0)
+	{
+		OrbisLog("[update] no helper on port %d to ask where the app is", port);
+		return false;
+	}
+	Request req;
+	memset(&req, 0, sizeof(req));
+	req.magic = kMagic;
+	req.cmd = kCmdAppPlace;
+	req.pid = int32_t(getpid());
+	req.ret = kRetUntouched;
+	snprintf(req.msg1, sizeof(req.msg1), "%s", title_id.c_str());
+	snprintf(req.msg2, sizeof(req.msg2), "%s", default_dir.c_str());
+	size_t got = 0;
+	bool timed_out = false;
+	if (WriteAll(fd, &req, sizeof(req)))
+		while (got < sizeof(req))
+		{
+			const ssize_t n = recv(fd, reinterpret_cast<char*>(&req) + got, sizeof(req) - got, 0);
+			if (n <= 0)
+			{
+				timed_out = n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK);
+				break;
+			}
+			got += size_t(n);
+		}
+	if (got != sizeof(req) || req.magic != kMagic || req.cmd != kCmdAppPlace || req.ret < 0 || req.ret > kMaxAppPlaceBytes)
+	{
+		close(fd);
+		if (timed_out)
+			OrbisLog("[update] the helper didn't say where the app is: no answer in 5 s");
+		else if (got != sizeof(req))
+			// a helper that doesn't know the request ignores it and closes the connection
+			OrbisLog("[update] the helper didn't say where the app is: it closed the connection (%zu bytes back): an "
+					 "older helper",
+				got);
+		else
+			OrbisLog("[update] the helper didn't say where the app is: it refused (ret %d)", req.ret);
+		return false;
+	}
+	text.resize(size_t(req.ret));
+	size_t have = 0;
+	while (have < text.size())
+	{
+		const ssize_t n = recv(fd, &text[have], text.size() - have, 0);
+		if (n <= 0)
+			break;
+		have += size_t(n);
+	}
+	close(fd);
+	if (have != text.size())
+	{
+		OrbisLog("[update] the helper's answer was cut short (%zu of %zu bytes): not used", have, text.size());
+		text.clear();
+		return false;
+	}
 	return true;
 }
 

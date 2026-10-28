@@ -784,6 +784,11 @@ std::vector<std::string> WrapLine(const std::string& text, int scale, int max_px
 }
 } // namespace
 
+void LogAppPlace()
+{
+	Place();
+}
+
 void CheckAfterUpdate()
 {
 	FILE* f = fopen(PendingPath().c_str(), "r");

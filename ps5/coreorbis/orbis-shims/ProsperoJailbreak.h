@@ -49,6 +49,11 @@ constexpr int32_t kRetUntouched = -1337;
 // msg1 asks "status", "check", "autocheck" (a notification when there is a newer version), "install" or "ack";
 // the answer's msg1 is the updater's status (update::Encode).
 constexpr int32_t kCmdUpdate = 7;
+// Our own (Media Player Classic PS5 1.5.1's fix): where the app the console runs is (ProsperoAppPlace.h): msg1 the
+// title id, msg2 the default folder; the helper answers ret = the length of its FindAppPlace's text, then the text.
+// A helper that doesn't know the request closes the connection.
+constexpr int32_t kCmdAppPlace = 8;
+constexpr int32_t kMaxAppPlaceBytes = 1 << 16;
 
 // The app side: ask for this process. Returns true when a helper answered yes; `how` names it.
 // Every step goes to OrbisLog (kept in memory until boot.log can be opened).
@@ -61,6 +66,9 @@ bool FetchWantedCovers(std::string& text, bool* background = nullptr);
 
 // The app side: one updater request to our own helper (kCmdUpdate). False when no helper of ours answered.
 bool UpdateRequest(const char* what, std::string& reply);
+
+// The app side: the helper's answer to kCmdAppPlace (no helper started for it). False when none came.
+bool FetchAppPlace(const std::string& title_id, const std::string& default_dir, std::string& text);
 
 // The helper ELF built into the app (helper_data.cpp in the native eboot; nothing elsewhere).
 struct Blob

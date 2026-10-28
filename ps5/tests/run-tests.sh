@@ -1704,8 +1704,11 @@ sed -i 's/"titleId": "PPSA99927"/"titleId": "PPSA00001"/' $O/sce_sys/param.json;
 inst39 inst7 STELLAPS5_HOST_MOUNTS="$SX/app/PPSA99927|nullfs|$O|rw"
 expect "grep -q 'mounted on $SX/app/PPSA99927 can.t be identified for sure' $T/inst7.txt && sums $O | cmp -s - $T/o.sums && [ ! -e $M/hb2 ]" "a mounted folder whose param.json names another title: the payload writes nothing (no second copy)"
 rm -f $T/root/logs/boot.log
-rc=$(STELLAPS5_SYSTEM_EX=$SX STELLAPS5_SHADOWMNT=$M/shadowmnt STELLAPS5_USER_APP=$M/userapp STELLAPS5_HOST_MOUNTS="$SX/app/PPSA99927|nullfs|$O|rw" run "$T" "0:0;30:$TRIANGLE;32:0;40:$UP;42:0;46:$UP;48:0;56:$CROSS;58:0;80:$CIRCLE;82:0;$(SHELFQUIT_AT 120)" "")
-expect "grep -q '\[update\] $SX/app/PPSA99927 is a nullfs mount of $O.*: not written' $T/root/logs/boot.log" "... the app doesn't take it for its own either"
+# (the app asks the helper, which reads the mount table: a title can't call statfs / getfsstat, see k)
+helper39 STELLAPS5_HOST_MOUNTS="$SX/app/PPSA99927|nullfs|$O|rw"
+rc=$(STELLAPS5_SYSTEM_EX=$SX STELLAPS5_SHADOWMNT=$M/shadowmnt STELLAPS5_USER_APP=$M/userapp run "$T" "0:0;30:$TRIANGLE;32:0;40:$UP;42:0;46:$UP;48:0;56:$CROSS;58:0;80:$CIRCLE;82:0;$(SHELFQUIT_AT 120)" "")
+stop39
+expect "grep -q '\[update\] (from the helper) $SX/app/PPSA99927 is a nullfs mount of $O.*: not written' $T/root/logs/boot.log" "... the app (the helper's answer) doesn't take it for its own either"
 # g. a backport's unionfs over ShadowMount+'s nullfs mount: the folder beneath is written directly, not through the layer
 rm -rf $SX/app/PPSA99927 && ln -s $U $SX/app/PPSA99927; ver $U 00.900.000
 inst39 inst8 STELLAPS5_HOST_MOUNTS="$SX/app/PPSA99927|nullfs|$U|rw;$M/usb0|exfatfs|/dev/da0s1|rw;$SX/app/PPSA99927|unionfs|$M/backport|rw"
@@ -1736,7 +1739,91 @@ rm -rf $M/hb2 $M/userapp
 mkdir -p $SX/app && rm -rf $SX/app/PPSA99927 && ln -s $U $SX/app/PPSA99927; ver $U 00.900.000
 inst39 inst14 STELLAPS5_HOST_MOUNTS="$SX/app/PPSA99927|nullfs|$U|rw;$M/usb0|ufs|/dev/lvd5|rw"
 expect "grep -q 'updated to 1.0 (in $U, the copy ShadowMount+ runs)' $T/inst14.txt && grep -q '\"contentVersion\": \"01.000.000\"' $U/sce_sys/param.json" "a writable folder on an LVD device: updated (not taken for an image)"
+# k. the app doesn't read the mount table: statfs / getfsstat are only in the SDK's libkernel_sys, which a title can't
+# load (Media Player Classic PS5 1.5 imported it and crashed at launch, its #3; group 45 checks the eboot). It asks the
+# helper (c, e, f above). Without the helper's answer -- a helper that doesn't know the request (it closes the
+# connection), or none -- ShadowMount+'s link is taken when its folder is what /system_ex/app shows (param.json, the same
+# eboot.bin), written directly, never through the mount; without a link, or with one to another folder, the app says it
+# can't tell and nothing is written
+(cd "$SRV" && exec python3 -m http.server $SPORT --bind 127.0.0.1 >/dev/null 2>&1) &
+sleep 0.5
+rm -rf $SX/app/PPSA99927 && ln -s $U $SX/app/PPSA99927; ver $U 00.900.000; echo "eboot usb old" >$U/eboot.bin; rm -f $U/manifest.sha256
+mkdir -p $M/userapp/PPSA99927 && echo "$U" >$M/userapp/PPSA99927/mount.lnk
+# the app: Settings, Updates (9.9 available), Cross: Install (or the message why not, closed by Cross), back, quit
+app39k() { # pad, env...
+	local pad=$1; shift
+	rm -f $T/root/logs/boot.log
+	( export STELLAPS5_HOST_PAD_GATE="55:$T/root/logs/boot.log:the helper's state: available 9.9" STELLAPS5_HOST_REALTIME=1 \
+		STELLAPS5_SYSTEM_EX=$SX STELLAPS5_SHADOWMNT=$M/shadowmnt STELLAPS5_USER_APP=$M/userapp "$@"; run "$T" "$pad" "" )
+}
+KPAD="0:0;30:$TRIANGLE;32:0;40:$UP;42:0;46:$UP;48:0;56:$CROSS;58:0;100:$CROSS;102:0;120:$CIRCLE;122:0;$(SHELFQUIT_AT 200)"
+helper39 STELLAPS5_HOST_MOUNTS="$MNT" STELLAPS5_HOST_HELPER_OLD=1
+expect "$UPD check 1.0 --until available,failed | grep -q '^available|9.9|'" "k: a helper that doesn't know the request: 9.9 available"
+rc=$(app39k "0:0;30:$TRIANGLE;32:0;40:$UP;42:0;46:$UP;48:0;56:$CROSS;58:0;120:$CIRCLE;122:0;$(SHELFQUIT_AT 200)")
+waitfor $T/root/logs/helper.log 'PPSA99927 installed\|installed in'
+expect "[ $rc = 0 ] && grep -q \"\[update\] the helper didn't say where the app is: it closed the connection\" $T/root/logs/boot.log && grep -q \"\[update\] $SX/app/PPSA99927 shows the app (no mount table); ShadowMount+'s link: $U ($M/userapp/PPSA99927/mount.lnk)\" $T/root/logs/boot.log && ! grep -q \"can't be installed here\" $T/root/logs/boot.log" "... the app: ShadowMount+'s link, the same eboot.bin as the mount shows: taken, the update allowed"
+expect "grep -q 'eboot v9.9' $U/eboot.bin && grep -q '\"contentVersion\": \"99.000.000\"' $U/sce_sys/param.json" "... the helper installs it there"
+stop39
+# (the next starts don't say "9.9 was installed, but this is still 1.0")
+rm -f $T/root/update-pending.txt
+ver $U 00.900.000; echo "eboot usb old" >$U/eboot.bin; rm -f $U/manifest.sha256; sums $U >$T/u.sums
+# no helper to answer (that request goes to a port nobody listens on) and no ShadowMount+ link
+rm -f $M/userapp/PPSA99927/mount.lnk
+(cd "$SRV" && exec python3 -m http.server $SPORT --bind 127.0.0.1 >/dev/null 2>&1) &
+sleep 0.5
+helper39 STELLAPS5_HOST_MOUNTS="$MNT"
+expect "$UPD check 1.0 --until available,failed | grep -q '^available|9.9|'" "k: 9.9 available"
+rc=$(app39k "$KPAD" STELLAPS5_HOST_APPPLACE_PORT=$((STELLAPS5_HELPER_PORT + 7)))
+stop39; cp $T/root/logs/boot.log $T/boot-k2.log
+expect "[ $rc = 0 ] && grep -q '\[update\] no helper on port .* to ask where the app is' $T/root/logs/boot.log && grep -q 'no ShadowMount+ link: not written' $T/root/logs/boot.log && grep -q \"can't be installed here: Stella PS5: the folder this copy runs from can't be told\" $T/root/logs/boot.log && sums $U | cmp -s - $T/u.sums" "... no helper's answer and no ShadowMount+ link: the app says it can't tell, nothing written"
+# a link to another folder than the one the mount shows (another eboot.bin)
+O2=$M/other2/PPSA99927
+rm -rf $M/other2 && mkdir -p $M/other2 && cp -r $U $O2 && echo "another eboot" >$O2/eboot.bin && sums $O2 >$T/o2.sums
+echo "$O2" >$M/userapp/PPSA99927/mount.lnk
+(cd "$SRV" && exec python3 -m http.server $SPORT --bind 127.0.0.1 >/dev/null 2>&1) &
+sleep 0.5
+helper39 STELLAPS5_HOST_MOUNTS="$MNT" STELLAPS5_HOST_HELPER_OLD=1
+expect "$UPD check 1.0 --until available,failed | grep -q '^available|9.9|'" "k: 9.9 available"
+rc=$(app39k "$KPAD")
+stop39; cp $T/root/logs/boot.log $T/boot-k3.log
+expect "[ $rc = 0 ] && grep -q \"ShadowMount+'s link: $O2 .*: not the folder the mount shows\" $T/root/logs/boot.log && grep -q \"can't be installed here\" $T/root/logs/boot.log && sums $U | cmp -s - $T/u.sums && sums $O2 | cmp -s - $T/o2.sums" "... a link to another folder than the one shown (another eboot.bin): the app says it can't tell, nothing written"
+rm -rf $M/userapp $M/other2
+# l. the helper's answer checked: a folder whose param.json names another title is not written, whatever the helper
+# says; a helper that took the unlock request and never answered isn't asked again (the start doesn't wait 5 s more);
+# one that answers the unlock but not this request: "no answer in 5 s", told apart from one that closes the connection
+O3=$M/other3/PPSA99927
+rm -rf $M/other3 && mkdir -p $M/other3 && cp -r $U $O3 && sed -i 's/"titleId": "PPSA99927"/"titleId": "PPSA00001"/' $O3/sce_sys/param.json && sums $O3 >$T/o3.sums
+printf 'place=1\nmount=\nsource=%s\ndir=%s\nfs=exfatfs\nwritable=1\nimage=0\nunsure=0\nvia_link=0\nimage_pending=0\nreason=\nlog=%s is the app\n' $O3 $O3 $O3 >$T/place.txt
+helper39 STELLAPS5_HOST_HELPER_PLACE=$T/place.txt
+rm -f $T/root/logs/boot.log
+rc=$(run "$T" "0:0;$(SHELFQUIT_AT 60)" "")
+stop39; cp $T/root/logs/boot.log $T/boot-l1.log
+expect "[ $rc = 0 ] && grep -q \"\[update\] (from the helper) $O3 is the app; but $O3 isn't this app's (its param.json doesn't name PPSA99927): not written\" $T/root/logs/boot.log && sums $O3 | cmp -s - $T/o3.sums" "l: a helper answering another title's folder: not taken (not writable), nothing written"
+rm -rf $M/other3
+python3 -c "
+import socket, sys, time
+s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(('127.0.0.1', int(sys.argv[1]))); s.listen(8)
+held = []
+while True:
+    c, _ = s.accept(); held.append(c)  # takes every request, never answers
+" $STELLAPS5_HELPER_PORT >/dev/null 2>&1 &
+MUTE=$!
+sleep 0.5
+rm -f $T/root/logs/boot.log
+rc=$(MAXFLIPS=200 run "$T" "0:0;$(SHELFQUIT_AT 60)" "")
+kill $MUTE 2>/dev/null; wait $MUTE 2>/dev/null
+expect "[ $rc = 0 ] && grep -q 'Stella helper (port $STELLAPS5_HELPER_PORT): no answer in 5 s' $T/root/logs/boot.log && grep -q \"the helper on port $STELLAPS5_HELPER_PORT didn't answer the unlock request: not asked where the app is either\" $T/root/logs/boot.log && python3 -c \"
+import re, sys
+lines = open(sys.argv[1]).read().splitlines()
+t = lambda pat: next(float(re.match(r'\\[ *([0-9.]+)\\]', l).group(1)) for l in lines if pat in l)
+sys.exit(0 if t('not asked where the app is') - t('no answer in 5 s') < 1.0 else 1)\" $T/root/logs/boot.log" "l: a helper that never answers the unlock: not asked where the app is (no 5 s more at the start)"
+helper39 STELLAPS5_HOST_MOUNTS="$MNT" STELLAPS5_HOST_HELPER_OLD=2
+rm -f $T/root/logs/boot.log
+rc=$(MAXFLIPS=600 run "$T" "0:0;$(SHELFQUIT_AT 60)" "")
+stop39
+expect "[ $rc = 0 ] && grep -q \"the helper didn't say where the app is: no answer in 5 s\" $T/root/logs/boot.log && ! grep -q 'it closed the connection' $T/root/logs/boot.log" "l: a helper that takes the request and doesn't answer: 'no answer in 5 s' (not 'closed')"
 expect "! grep -q 'runtime error\|AddressSanitizer' $T/inst*.txt $T/helper.txt" "the payload and the helper: no sanitizer reports"
+nosan "$T"
 stop39
 [ "$M" = "$T" ] || rm -rf "$M"
 fi
@@ -1944,6 +2031,34 @@ waitfor $T/inst-repair.txt 'listening on 127.0.0.1'
 expect "grep -q 'an update wasn.t finished; repairing the app' $T/inst-repair.txt && [ ! -e $H/update.journal ] && [ ! -e $H/eboot.bin.old.9-9 ] && cmp -s $H/eboot.bin tests/fake-eboot.bin" "the payload repairs it: its files back, the journal and the leftovers gone"
 expect "! grep -q 'runtime error\|AddressSanitizer' $T/helper.txt $T/inst-repair.txt" "no sanitizer reports"
 stop44
+fi
+
+if want 45; then
+echo "== 45. the eboot imports only what a title may load (no libkernel_sys / libkernel_web: Media Player Classic PS5 1.5's crash at launch, its #3)"
+SDKLIB=${PS5_PAYLOAD_SDK:-/opt/ps5-payload-sdk}/target/lib
+if [ -f build/app/stella-pie.elf ] && [ -d "$SDKLIB" ]; then
+	python3 tools/check_imports.py build/app/stella-pie.elf "$SDKLIB" >"$WORK/imports.txt" 2>&1
+	rc=$?
+	expect "[ $rc = 0 ] && grep -q '^check_imports: ok' $WORK/imports.txt && ! grep -q 'libkernel_sys\|libkernel_web' $WORK/imports.txt" "the app's PIE (build/app/stella-pie.elf): only allowed modules, every import found in one of them"
+else
+	echo "  (skipped: build/app/stella-pie.elf or the SDK isn't there -- make ps5 first)"
+fi
+# the check itself: a PIE calling statfs (as Media Player Classic PS5 1.5 did, and Stella PS5's app before) is refused,
+# naming the symbol and libkernel_sys
+if [ -d "$SDKLIB" ] && command -v ld.lld >/dev/null && command -v clang >/dev/null; then
+	mkdir -p "$WORK/imp"
+	printf 'int statfs(const char*, void*);\nint _start(void) { return statfs("/", 0); }\n' >"$WORK/imp/bad.c"
+	clang -fPIC -c -o "$WORK/imp/bad.o" "$WORK/imp/bad.c" &&
+		ld.lld -pie --no-dynamic-linker -e _start -o "$WORK/imp/bad.elf" "$WORK/imp/bad.o" --as-needed "$SDKLIB/libkernel.so" "$SDKLIB/libkernel_sys.so"
+	python3 tools/check_imports.py "$WORK/imp/bad.elf" "$SDKLIB" >"$WORK/imp/out.txt" 2>&1
+	rc=$?
+	expect "[ $rc = 1 ] && grep -q 'NEEDED libkernel_sys.sprx: not a module the app may load' $WORK/imp/out.txt && grep -q 'import statfs: not in an allowed module (only in libkernel_sys.so)' $WORK/imp/out.txt" "a PIE importing statfs: refused, naming libkernel_sys"
+	# and the app's link leaves libkernel_sys / libkernel_web out: such a symbol doesn't link at all
+	make -s --eval 'print-app-stubs: ; @echo $(APP_STUBS)' print-app-stubs >"$WORK/imp/stubs.txt" 2>&1
+	expect "grep -q '/libkernel.so' $WORK/imp/stubs.txt && ! grep -q 'libkernel_sys\|libkernel_web' $WORK/imp/stubs.txt" "the app's link takes no libkernel_sys / libkernel_web stub (such a symbol doesn't link at all)"
+else
+	echo "  (skipped: no SDK, ld.lld or clang for the check's own test)"
+fi
 fi
 
 echo

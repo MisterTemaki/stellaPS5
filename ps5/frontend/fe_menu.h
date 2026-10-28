@@ -24,6 +24,9 @@ void NetworkMenu();
 // At start, after an update installed from Settings > Updates: is this the new version? It says so (a notification), or
 // says what to do when the console still started the old files (ShadowMount+: Media Player Classic PS5 1.5's checks).
 void CheckAfterUpdate();
+// Where the app the console runs is (the helper's answer, ProsperoAppPlace.h), looked up once at the start: boot.log says
+// it, and Updates uses it.
+void LogAppPlace();
 
 // Shows a message box until Cross / Circle is pressed (errors such as a game that won't start).
 void MessageBox(const std::string& title, const std::string& text);

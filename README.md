@@ -35,7 +35,7 @@ repository's first commit has it, apart from this README (Stella's own is [READM
 drives the cores through their libretro interface and plays the part RetroArch plays on a PC.
 
 > **Status (1.0):** builds with the ps5-payload-dev SDK into a signed native app (`eboot.bin`) and its payload, and
-> passes 556 host tests (with netfs's 235 checks, the 7z reader's 43, the NFS backend's and the tabs' unit tests), which
+> passes 570 host tests (with netfs's 235 checks, the 7z reader's 43, the NFS backend's and the tabs' unit tests), which
 > run the same code -- the four cores included -- on Linux
 > with the PS5 calls simulated: test programs written for this port (a 2600 game that shows on screen which inputs
 > and switches it sees, a 5200, a 7800 and a Lynx program) are played through the whole chain -- the shelf, the pad,
@@ -114,6 +114,15 @@ The app updates itself from this repository's GitHub releases, as Beetle PCE PS5
   used only when its name is whole (the system cuts it at 87 characters), otherwise the files go only through the
   mount; another layer on top of the mount (a backport's unionfs) is never written into -- the folder beneath is;
   and when the mount can't be read at all, nothing is written.
+  - **The mount table is read by the helper**, not by the app (Media Player Classic PS5 1.5.1's fix): `statfs` /
+    `getfsstat` are only in the SDK's `libkernel_sys`, a library for the console's system processes that a title
+    can't load -- Media Player Classic PS5 1.5's app imported it and the console stopped it at launch (SIGSYS, its
+    #3). Stella PS5's app asks the helper (`boot.log`: `[update] (from the helper) ...`). Without the helper's answer
+    (none running, or one that doesn't know the request) the app goes by ShadowMount+'s link
+    `/user/app/PPSA99927/mount.lnk`: that folder counts only when its `param.json` names PPSA99927 and its `eboot.bin`
+    is the one `/system_ex/app/PPSA99927` shows (an image's folder never); without a link, or with one to another
+    folder, Updates says the app can't tell which folder it runs from and nothing is written. The build checks the
+    eboot: `tools/check_imports.py` fails it if it would load any module, or import any symbol, a title can't.
   - **No mount yet** (the payload autoloaded before ShadowMount+ mounted the app): the folder ShadowMount+ last
     mounted is in its link `/user/app/PPSA99927/mount.lnk`; the payload updates that folder, so **no second copy** is
     made in `/data/homebrew`. If it isn't there (a drive not connected yet), nothing is written.
@@ -197,6 +206,25 @@ the helper is already running only installs and exits. (The updater does the sam
 
 **If "Stella PS5 has no access to /data" appears:** no helper answered and the ELF loader wasn't running. Send
 `StellaPS5.elf` and open the icon again.
+
+### If the app doesn't open
+
+If the console stops the app at launch ("Error in game PPSA99927", with a signal such as 12, SIGSYS), please report it
+(with `/data/stella/logs/boot.log` and `installer.log` if they are there: turn on Settings, SYSTEM, Debug logs first
+if the app opened before). Stella PS5's eboot loads only the system modules a title may load
+(`tools/check_imports.py` checks every build: the cause of Media Player Classic PS5 1.5's crash at launch, its #3,
+can't come back unnoticed), but only a PS5 can confirm it opens. To put another version in place:
+- **Send that version's payload** (`StellaPS5-v<version>.elf`) and put it in your autoload. A newer payload writes
+  itself over the installed app, into the folder ShadowMount+ runs it from; close the app if it is open, then open it
+  again.
+- **Going back to an older version:** a payload never writes itself over a newer one ("a newer version is installed
+  ... left it as it is"), so first move or delete the app's folder (`/data/homebrew/PPSA99927`, or the one ShadowMount+
+  runs it from), then send the older payload: it installs afresh. If the app is in an image, put the older version's
+  folder in the image instead.
+- **With ShadowMount+** (what Sulfurico-One64 did for Media Player Classic PS5; it works for any version): move the app's folder out of the place ShadowMount+
+  scans, uninstall the app from the home screen, let ShadowMount+ run again (from the Payload Manager) so it forgets
+  it, then put the folder of the version you want back (from that version's release zip, or with its payload) and run
+  ShadowMount+ again: it registers the app from that folder.
 
 | Folder | Contents |
 |---|---|
@@ -456,8 +484,8 @@ block is written at the end of `boot.log` (the signal, the stage each part was i
   confirm: that the app starts, draws and sounds right at full speed (the PS5 build is `-O3` with the same code), the
   controller's feel (the 5200 stick's range and deadzone on a DualSense, the switches), real games and real BIOS files
   (Stella's database and detection on real cartridges, the 5200 games the built-in BIOS can't run, Gearlynx with a real
-  `lynxboot.img` and real `.lnx` games, their rotation), the ShadowMount+ part (the mount table, writing through
-  `/system_ex/app`, `mount.lnk`, Restart's eboot), the updater against GitHub, covers over HTTPS from the console, and
+  `lynxboot.img` and real `.lnx` games, their rotation), the ShadowMount+ part (the mount table, read by the helper;
+  writing through `/system_ex/app`, `mount.lnk`, the same-eboot check through the mount, Restart's eboot), the updater against GitHub, covers over HTTPS from the console, and
   network shares against a real NAS.
 - 2600: joystick only (no paddles, driving controllers, keypads, trackballs, mice, light guns: the message above); no
   PlusROM network games (Stella's HTTP support isn't built in); no cheats; no debugger.
@@ -473,11 +501,12 @@ g++ with ASan for the tests.
 ```sh
 export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
 cd ps5
-make ps5 -j$(nproc)              # build/ps5/StellaPS5.elf (installer + helper, with the app inside)
+make ps5 -j$(nproc)              # build/ps5/StellaPS5.elf (installer + helper, with the app inside); fails if the
+                                 # eboot would load a module or import a symbol a title can't (tools/check_imports.py)
 make send PS5_HOST=192.168.0.10  # sends it to elfldr (port 9021)
 make dist                        # build/dist/StellaPS5-v<version>.elf, StellaPS5-v<version>-PPSA99927.zip, the source zip
 make app                         # only build/app/PPSA99927/, to copy by hand
-make test                        # Linux builds (app, installer, helper) + the 556 host tests (ASan/UBSan), with netfs's,
+make test                        # Linux builds (app, installer, helper) + the 570 host tests (ASan/UBSan), with netfs's,
                                  # the NFS backend's, the tabs' and the 7z reader's unit tests
 ```
 

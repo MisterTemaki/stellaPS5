@@ -222,6 +222,7 @@ int Run(int argc, char** argv)
 	{
 		WritePid();
 		AutoCheckUpdates();
+		fe::LogAppPlace();
 	}
 	fe::Config().Load();
 

@@ -233,6 +233,41 @@ std::string EnvOr(const char* name, const char* fallback)
 	return v && *v ? v : fallback;
 }
 
+// The host tests: STELLAPS5_HOST_HELPER_OLD=1 makes this helper one that doesn't know kCmdAppPlace (it closes the
+// connection, as any request it doesn't know); =2 one that takes it and never answers (the app waits 5 s);
+// STELLAPS5_HOST_HELPER_PLACE=<file> one that answers with that file's text (another folder than the app's)
+int HostHelperOld()
+{
+#ifdef __PROSPERO__
+	return 0;
+#else
+	const char* v = getenv("STELLAPS5_HOST_HELPER_OLD");
+	return v ? atoi(v) : 0;
+#endif
+}
+
+bool OlderHelperForTests()
+{
+	return HostHelperOld() == 1;
+}
+
+bool HostPlaceAnswer(std::string& text)
+{
+#ifdef __PROSPERO__
+	(void)text;
+	return false;
+#else
+	const char* path = getenv("STELLAPS5_HOST_HELPER_PLACE");
+	FILE* f = path && *path ? fopen(path, "rb") : nullptr;
+	if (!f)
+		return false;
+	text.assign(65536, '\0');
+	text.resize(fread(&text[0], 1, text.size(), f));
+	fclose(f);
+	return true;
+#endif
+}
+
 // Where the update goes (Media Player Classic PS5 1.5's ShadowMount+ fix, ProsperoAppPlace.h): the folder the console
 // runs the app from -- ShadowMount+'s mount of it on /system_ex/app/<TITLE_ID>, written through the mount --, else
 // /data/homebrew/<TITLE_ID>. Looked up again before each check and install: the helper may have started (autoloaded)
@@ -392,6 +427,30 @@ bool ServeHelper(void (*on_ready)())
 				snprintf(req.msg1, sizeof(req.msg1), "%s", answer.c_str());
 			}
 			SendUntil(c, &req, sizeof(req), deadline);
+		}
+		else if (got == sizeof(req) && req.magic == kMagic && req.cmd == kCmdAppPlace && !OlderHelperForTests())
+		{
+			// where the app the console runs is, read here (statfs / getfsstat are a payload's to call, not a title's:
+			// Media Player Classic PS5 1.5.1's fix). Only this title, and only an absolute default folder of it
+			req.msg1[sizeof(req.msg1) - 1] = 0;
+			req.msg2[sizeof(req.msg2) - 1] = 0;
+			const std::string title = req.msg1, dflt = req.msg2;
+			const std::string tail = "/" + title;
+			std::string text;
+			if (HostHelperOld() == 2)
+			{
+				OrbisLog("[helper] pid %d: where %s is: held, no answer (host tests)", req.pid, title.c_str());
+				usleep(6 * 1000 * 1000);
+				close(c);
+				continue;
+			}
+			if (title == STELLAPS5_TITLE_ID && !dflt.empty() && dflt[0] == '/' && dflt.size() > tail.size() &&
+				dflt.compare(dflt.size() - tail.size(), tail.size(), tail) == 0 && !HostPlaceAnswer(text))
+				text = SerializeAppPlace(FindAppPlace(title, dflt));
+			req.ret = text.empty() || text.size() > size_t(kMaxAppPlaceBytes) ? -1 : int32_t(text.size());
+			OrbisLog("[helper] pid %d: where %s is: %s", req.pid, title.c_str(), req.ret < 0 ? "refused" : "answered");
+			if (SendUntil(c, &req, sizeof(req), deadline) && req.ret > 0)
+				SendUntil(c, text.data(), text.size(), deadline);
 		}
 		else
 			OrbisLog("[helper] ignored a request of %zu bytes (magic %x, cmd %d)", got, req.magic, req.cmd);

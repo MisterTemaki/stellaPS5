@@ -95,7 +95,7 @@ EMU_SRC := coreorbis/main-boot.cpp \
 	coreorbis/orbis-shims/ProsperoVideo.cpp coreorbis/orbis-shims/ProsperoAudio.cpp \
 	coreorbis/orbis-shims/ProsperoInput.cpp coreorbis/orbis-shims/ProsperoJailbreak.cpp \
 	coreorbis/orbis-shims/ProsperoCrash.cpp coreorbis/orbis-shims/ProsperoCrt.cpp \
-	coreorbis/orbis-shims/ProsperoUpdate.cpp coreorbis/orbis-shims/ProsperoAppPlace.cpp \
+	coreorbis/orbis-shims/ProsperoUpdate.cpp coreorbis/orbis-shims/ProsperoAppPlaceApp.cpp \
 	frontend/fe_emu.cpp frontend/fe_cores.cpp frontend/fe_menu.cpp frontend/fe_settings.cpp frontend/fe_i18n.cpp frontend/fe_text.cpp \
 	frontend/fe_games.cpp frontend/fe_http.cpp frontend/fe_covers.cpp frontend/fe_shelf.cpp \
 	frontend/fe_prefetch.cpp frontend/fe_coverfetch.cpp frontend/fe_coverworker.cpp \
@@ -124,6 +124,9 @@ EMU_C_SRC := frontend/third_party/unzip.c frontend/third_party/ioapi.c
 # runs (the switches, the controllers, the palette) and of Stella's property database; built as the core is (C++20, its
 # defines and headers)
 BRIDGE_SRC := frontend/fe_stella.cxx
+# the app's build of ProsperoAppPlace.cpp: no statfs / getfsstat (libkernel_sys, which a title can't load: Media Player
+# Classic PS5 1.5's crash at launch, its #3); it asks the helper, whose build reads the mount table
+%/port/coreorbis/orbis-shims/ProsperoAppPlaceApp.o: coreorbis/orbis-shims/ProsperoAppPlace.cpp
 # the payloads: the helper, and the installer (= helper + install)
 # (the helper also downloads the covers in the background: fe_coverworker.cpp, with the app's HTTPS code)
 HELPER_SRC := coreorbis/orbis-shims/orbis_paths.cpp coreorbis/orbis-shims/ProsperoNotify.cpp \
@@ -303,8 +306,11 @@ LIBC_BUILDER := $(NATIVE)/build/host/libc-builder
 LLD ?= ld.lld
 NATIVE_CLANG = PS5_PAYLOAD_SDK=$(PS5_PAYLOAD_SDK) sh $(NATIVE)/tooling/prospero-clang18
 SDK_LIB := $(PS5_PAYLOAD_SDK)/target/lib
-# every system-module stub but the two PS5SX2 leaves out (link-vk.sh)
-APP_STUBS = $(filter-out %/libScePosixForWebKit.so %/libSceGLSlimVSH.so,$(sort $(wildcard $(SDK_LIB)/*.so)))
+# every system-module stub but the two PS5SX2 leaves out (link-vk.sh), and not libkernel_sys / libkernel_web either: a
+# title can't load them (Media Player Classic PS5 1.5 picked up libkernel_sys through statfs and crashed at launch, its
+# #3); with them left out such a symbol is a link error. tools/check_imports.py checks the result.
+APP_STUBS = $(filter-out %/libScePosixForWebKit.so %/libSceGLSlimVSH.so %/libkernel_sys.so %/libkernel_web.so,\
+	$(sort $(wildcard $(SDK_LIB)/*.so)))
 
 $(NATIVE_TOOL): $(NATIVE)/tooling/native/native_app_builder.cpp $(NATIVE)/tooling/native/elf_object.cpp \
 		$(NATIVE)/tooling/native/self_container.cpp $(NATIVE)/tooling/native/sce_module_writer.cpp
@@ -348,6 +354,7 @@ build/app/stella-pie.elf: $(PS5_OUT)/symbols.ok $(EBOOT_OBJS) $(NATIVE)/tooling/
 		-e _start --no-dynamic-linker $(NETFS_WRAP_LLD) -o $@ $(EBOOT_OBJS) \
 		--as-needed $(APP_STUBS) -L $(SDK_LIB) \
 		$(SDK_LIB)/libc++.a $(SDK_LIB)/libc++abi.a $(SDK_LIB)/libunwind.a $(SDK_LIB)/libc.a -lpthread
+	python3 tools/check_imports.py $@ $(SDK_LIB) || { rm -f $@; exit 1; }
 
 build/app/eboot.elf: build/app/stella-pie.elf $(NATIVE_TOOL)
 	$(NATIVE_TOOL) link --in $< --out $@ --stub-dir $(SDK_LIB) --module-sdk 0x02000009 \
