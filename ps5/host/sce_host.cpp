@@ -1,0 +1,600 @@
+// Stella PS5 host build: the PS5 system calls of include-orbis/ProsperoSce.h, implemented on Linux so the
+// whole port (main-boot, shims, frontend, core) runs unchanged in the tests.
+//
+//   STELLAPS5_HOST_PAD="frame:hexbuttons[,lx,ly,rx,ry][;...]"  pad 1 script (by flip count; sticks 0..255, 128 = centre)
+//   STELLAPS5_HOST_PADS=n                                        signed-in users, each with a pad (1..4, default 1)
+//   STELLAPS5_HOST_PAD2, _PAD3, _PAD4                            the other users' pads' scripts (as STELLAPS5_HOST_PAD)
+//   STELLAPS5_HOST_SIGNOUT="flip:user[;flip:user...]"            user 2..4 signs out from that flip on
+//   STELLAPS5_HOST_PAD_DROP="user:from:to"                        that user's pad reads fail from flip `from` to `to`
+//   STELLAPS5_HOST_DUMP="frame[,frame...]"                       flips to save as PPM (de-tiled)
+//   STELLAPS5_HOST_DUMP_DIR=dir                                  where (default .)
+//   STELLAPS5_HOST_MAX_FLIPS=n                                   abort after n flips (a hang guard)
+//   STELLAPS5_HOST_REALTIME=1                                    flips wait 1/60 s
+//   STELLAPS5_HOST_AUDIO_DUMP=file                               the sound played, raw 48 kHz stereo s16
+//
+// SPDX-License-Identifier: MIT
+
+#include "ProsperoSce.h"
+
+#include <atomic>
+#include <mutex>
+#include <chrono>
+#include <thread>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <ctime>
+#include <map>
+#include <set>
+#include <string>
+#include <unistd.h>
+#include <vector>
+
+namespace
+{
+SceVideoOutBuffers g_bufs[2];
+int g_w = 0, g_h = 0;
+std::atomic<uint64_t> g_flips{0};
+std::atomic<uint64_t> g_audio_frames{0};
+// a step of a pad's script: its buttons, and its sticks (0..255, 128 = the centre)
+struct PadStep
+{
+	uint32_t buttons = 0;
+	uint8_t lx = 128, ly = 128, rx = 128, ry = 128;
+};
+std::map<uint64_t, PadStep> g_script[4]; // pad 1..4 (STELLAPS5_HOST_PAD, STELLAPS5_HOST_PAD2...)
+std::set<uint64_t> g_dumps;
+std::map<int, uint64_t> g_signout; // user index (0..3) -> the flip it signs out at
+bool g_pad_open[4] = {};           // the pads opened (scePadOpen) and not closed
+bool g_inited = false;
+
+void InitEnv()
+{
+	if (g_inited)
+		return;
+	g_inited = true;
+	static const char* const kPadVars[4] = {"STELLAPS5_HOST_PAD", "STELLAPS5_HOST_PAD2", "STELLAPS5_HOST_PAD3", "STELLAPS5_HOST_PAD4"};
+	for (int pad = 0; pad < 4; pad++)
+		if (const char* s = getenv(kPadVars[pad]))
+		{
+			std::string str = s;
+			size_t pos = 0;
+			while (pos < str.size())
+			{
+				size_t end = str.find(';', pos);
+				if (end == std::string::npos)
+					end = str.size();
+				const std::string item = str.substr(pos, end - pos);
+				const size_t colon = item.find(':');
+				if (colon != std::string::npos)
+				{
+					PadStep st;
+					const std::string v = item.substr(colon + 1);
+					st.buttons = uint32_t(strtoul(v.c_str(), nullptr, 16));
+					unsigned lx = 128, ly = 128, rx = 128, ry = 128;
+					const size_t comma = v.find(',');
+					if (comma != std::string::npos)
+						sscanf(v.c_str() + comma + 1, "%u,%u,%u,%u", &lx, &ly, &rx, &ry);
+					st.lx = uint8_t(lx);
+					st.ly = uint8_t(ly);
+					st.rx = uint8_t(rx);
+					st.ry = uint8_t(ry);
+					g_script[pad][strtoull(item.substr(0, colon).c_str(), nullptr, 10)] = st;
+				}
+				pos = end + 1;
+			}
+		}
+	if (const char* s = getenv("STELLAPS5_HOST_SIGNOUT"))
+	{
+		std::string str = s;
+		size_t pos = 0;
+		while (pos < str.size())
+		{
+			size_t end = str.find(';', pos);
+			if (end == std::string::npos)
+				end = str.size();
+			const std::string item = str.substr(pos, end - pos);
+			const size_t colon = item.find(':');
+			const int user = colon == std::string::npos ? 0 : atoi(item.c_str() + colon + 1);
+			if (user >= 2 && user <= 4)
+				g_signout[user - 1] = strtoull(item.substr(0, colon).c_str(), nullptr, 10);
+			pos = end + 1;
+		}
+	}
+	if (const char* s = getenv("STELLAPS5_HOST_DUMP"))
+	{
+		std::string str = s;
+		size_t pos = 0;
+		while (pos < str.size())
+		{
+			size_t end = str.find(',', pos);
+			if (end == std::string::npos)
+				end = str.size();
+			g_dumps.insert(strtoull(str.substr(pos, end - pos).c_str(), nullptr, 10));
+			pos = end + 1;
+		}
+	}
+}
+
+// The same swizzle as ProsperoVideo.cpp, written out again here as the reference.
+uint32_t TileOffset(uint32_t x, uint32_t y)
+{
+	return (((x)&1u) << 0 | ((x >> 1) & 1u) << 1 | ((y >> 0) & 1u) << 2 | ((y >> 1) & 1u) << 3 |
+			((y >> 2) & 1u) << 4 | ((x >> 2) & 1u) << 5 | (((x >> 3) ^ (y >> 3)) & 1u) << 6 |
+			(((x >> 4) ^ (y >> 4)) & 1u) << 7 | (((x >> 6) ^ (y >> 5)) & 1u) << 8 |
+			(((x >> 5) ^ (y >> 6)) & 1u) << 9 | ((y >> 3) & 1u) << 10 | ((x >> 4) & 1u) << 11 |
+			((y >> 6) & 1u) << 12 | ((x >> 6) & 1u) << 13 | ((x >> 7) & 1u) << 14 | ((x >> 8) & 1u) << 15);
+}
+
+void Dump(int idx, uint64_t n)
+{
+	const char* dir = getenv("STELLAPS5_HOST_DUMP_DIR");
+	char path[512];
+	snprintf(path, sizeof(path), "%s/flip%05llu.ppm", dir ? dir : ".", (unsigned long long)n);
+	FILE* f = fopen(path, "wb");
+	if (!f)
+		return;
+	fprintf(f, "P6\n%d %d\n255\n", g_w, g_h);
+	const uint32_t* t = static_cast<const uint32_t*>(g_bufs[idx].data);
+	std::vector<uint8_t> row(size_t(g_w) * 3);
+	for (int y = 0; y < g_h; y++)
+	{
+		for (int x = 0; x < g_w; x++)
+		{
+			const uint32_t off = (x / 512) * 65536 + (y / 128) * (128 * g_w) + (TileOffset(x % 512, 0) ^ TileOffset(0, y % 128));
+			const uint32_t p = t[off];
+			row[x * 3] = p & 0xff;
+			row[x * 3 + 1] = (p >> 8) & 0xff;
+			row[x * 3 + 2] = (p >> 16) & 0xff;
+		}
+		fwrite(row.data(), 1, row.size(), f);
+	}
+	fclose(f);
+	fprintf(stderr, "[host] dumped %s\n", path);
+}
+} // namespace
+
+extern "C" {
+// STELLAPS5_HOST_DIRECT_MAX_MIB=n: bigger direct allocations fail with EAGAIN, like a payload with little memory
+// STELLAPS5_HOST_DIRECT_FAIL_FIRST=n: the first n direct allocations fail (the launcher app still holds memory)
+static int DirectFails(size_t len)
+{
+	static int calls = 0;
+	calls++;
+	if (const char* f = getenv("STELLAPS5_HOST_DIRECT_FAIL_FIRST"))
+		if (calls <= atoi(f))
+			return 1;
+	if (const char* m = getenv("STELLAPS5_HOST_DIRECT_MAX_MIB"))
+		if (len > size_t(atoi(m)) << 20)
+			return 1;
+	return 0;
+}
+int sceKernelAllocateDirectMemory(int64_t, int64_t, size_t len, size_t align, int type, intptr_t* phys_out)
+{
+	return sceKernelAllocateMainDirectMemory(len, align, type, phys_out);
+}
+size_t sceKernelGetDirectMemorySize(void)
+{
+	return size_t(5) << 30;
+}
+int sceKernelAvailableDirectMemorySize(int64_t, int64_t, size_t, int64_t* start_out, size_t* size_out)
+{
+	*start_out = 0;
+	*size_out = size_t(64) << 20;
+	return 0;
+}
+int sceKernelMapNamedFlexibleMemory(void**, size_t, int, int, const char*)
+{
+	return (int)0x8002000c; // ENOMEM: the host never hands out flexible memory, so that path stays untested here
+}
+int sceKernelAvailableFlexibleMemorySize(size_t* size)
+{
+	*size = 0;
+	return 0;
+}
+int sceKernelAllocateMainDirectMemory(size_t len, size_t, int, intptr_t* phys_out)
+{
+	if (DirectFails(len))
+		return (int)0x80020023;
+	void* p = aligned_alloc(0x20000, len);
+	*phys_out = reinterpret_cast<intptr_t>(p);
+	return p ? 0 : -1;
+}
+int sceKernelMapDirectMemory(void** addr, size_t, int, int, intptr_t phys, size_t)
+{
+	*addr = reinterpret_cast<void*>(phys);
+	return 0;
+}
+int sceKernelReleaseDirectMemory(intptr_t phys, size_t)
+{
+	free(reinterpret_cast<void*>(phys));
+	return 0;
+}
+int sceKernelCreateEqueue(SceKernelEqueue* eq, const char*)
+{
+	*eq = reinterpret_cast<SceKernelEqueue>(0x1);
+	return 0;
+}
+int sceKernelWaitEqueue(SceKernelEqueue, void*, int, int* out, unsigned int*)
+{
+	if (getenv("STELLAPS5_HOST_REALTIME"))
+	{
+		// a flip completes at the next 60 Hz vblank, like on the console
+		static const auto t0 = std::chrono::steady_clock::now();
+		const auto period = std::chrono::microseconds(16667);
+		const auto since = std::chrono::steady_clock::now() - t0;
+		const auto next = t0 + (since / period + 1) * period;
+		std::this_thread::sleep_until(next);
+	}
+	if (out)
+		*out = 1;
+	return 0;
+}
+int sceKernelDeleteEqueue(SceKernelEqueue)
+{
+	return 0;
+}
+int sceKernelSendNotificationRequest(int, void* request, size_t, int)
+{
+	fprintf(stderr, "[host] notification: %s\n", static_cast<const char*>(request) + 0x2d);
+	return 0;
+}
+int sceKernelUsleep(unsigned int usec)
+{
+	return usleep(usec);
+}
+int sceSystemServiceHideSplashScreen(void)
+{
+	fprintf(stderr, "[host] splash screen hidden\n");
+	return 0;
+}
+int sceSystemServiceLoadExec(const char* path, const char**)
+{
+	// the host has no system to close the app: the caller falls back to _exit()
+	fprintf(stderr, "[host] sceSystemServiceLoadExec(%s)\n", path ? path : "(null)");
+	return -1;
+}
+
+// STELLAPS5_HOST_VIDEO_BUSY=N: the first N opens find the screen held by another process (0x80290009)
+int sceVideoOutOpen(int, int, int, const void*)
+{
+	InitEnv();
+	static int busy = getenv("STELLAPS5_HOST_VIDEO_BUSY") ? atoi(getenv("STELLAPS5_HOST_VIDEO_BUSY")) : 0;
+	if (busy > 0)
+	{
+		busy--;
+		return (int)0x80290009;
+	}
+	return 1;
+}
+int sceVideoOutClose(int)
+{
+	fprintf(stderr, "[host] video closed after %llu flips\n", (unsigned long long)g_flips.load());
+	return 0;
+}
+int sceVideoOutAddFlipEvent(SceKernelEqueue, int, void*)
+{
+	return 0;
+}
+int sceVideoOutDeleteFlipEvent(SceKernelEqueue, int)
+{
+	return 0;
+}
+int sceVideoOutSetFlipRate(int, int)
+{
+	return 0;
+}
+void sceVideoOutSetBufferAttribute2(SceVideoOutBufferAttribute2* attr, uint64_t, uint32_t, uint32_t w, uint32_t h,
+	uint64_t, uint32_t, uint64_t)
+{
+	memcpy(attr->junk0, &w, 4);
+	memcpy(attr->junk0 + 4, &h, 4);
+}
+int sceVideoOutRegisterBuffers2(int, int, int, SceVideoOutBuffers* buffers, int count, SceVideoOutBufferAttribute2* attr,
+	int, void*)
+{
+	for (int i = 0; i < count && i < 2; i++)
+		g_bufs[i] = buffers[i];
+	memcpy(&g_w, attr->junk0, 4);
+	memcpy(&g_h, attr->junk0 + 4, 4);
+	return 0;
+}
+int sceVideoOutSubmitFlip(int, int idx, uint32_t, int64_t)
+{
+	const uint64_t n = g_flips.fetch_add(1);
+	if (g_dumps.count(n))
+		Dump(idx, n);
+	if (const char* m = getenv("STELLAPS5_HOST_MAX_FLIPS"))
+		if (n >= strtoull(m, nullptr, 10))
+		{
+			fprintf(stderr, "[host] STELLAPS5_HOST_MAX_FLIPS reached: abort\n");
+			_exit(3);
+		}
+	return 0;
+}
+
+int32_t sceAudioOutInit(void)
+{
+	return 0;
+}
+int32_t sceAudioOutOpen(int32_t, int32_t, int32_t, uint32_t, uint32_t, uint32_t)
+{
+	return 7;
+}
+int32_t sceAudioOutOutput(int32_t, const void* p)
+{
+	// play at the real rate so the audio thread paces like on the console: an absolute clock, as the
+	// hardware's (a plain sleep per grain drifts slow, which the frontend's rate control would then chase)
+	static timespec next = {};
+	timespec now;
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	if (next.tv_sec == 0 || (now.tv_sec - next.tv_sec) * 1000000000L + (now.tv_nsec - next.tv_nsec) > 50000000L)
+		next = now; // the first grain, or the thread was away (> 50 ms): start again from now
+	next.tv_nsec += 256L * 1000000000L / 48000;
+	while (next.tv_nsec >= 1000000000L)
+	{
+		next.tv_nsec -= 1000000000L;
+		next.tv_sec++;
+	}
+	clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, nullptr);
+	const int16_t* s = static_cast<const int16_t*>(p);
+	static uint64_t nonzero = 0;
+	for (int i = 0; i < 512; i++)
+		nonzero += s[i] != 0;
+	g_audio_frames += 256;
+	// STELLAPS5_HOST_AUDIO_DUMP=<file>: everything played, as raw 48 kHz stereo s16 (the tests check its tones)
+	static FILE* dump = getenv("STELLAPS5_HOST_AUDIO_DUMP") ? fopen(getenv("STELLAPS5_HOST_AUDIO_DUMP"), "wb") : nullptr;
+	if (dump)
+	{
+		fwrite(s, sizeof(int16_t), 512, dump);
+		fflush(dump);
+	}
+	if (getenv("STELLAPS5_HOST_AUDIO_STATS") && (g_audio_frames % (48000 * 2)) < 256)
+		fprintf(stderr, "[host] audio: %llu frames played, %llu non-zero samples\n",
+			(unsigned long long)g_audio_frames.load(), (unsigned long long)nonzero);
+	return 0;
+}
+int32_t sceAudioOutClose(int32_t)
+{
+	return 0;
+}
+
+int scePadInit(void)
+{
+	return 0;
+}
+// STELLAPS5_HOST_PAD_SHARED=1: what the first console log showed -- the system already has the pad open
+// (scePadOpen: already opened) and scePadGetHandle hands out 0x809b0081, negative as an int.
+static bool PadShared()
+{
+	const char* e = getenv("STELLAPS5_HOST_PAD_SHARED");
+	return e && *e && strcmp(e, "0") != 0;
+}
+// the signed-in users (STELLAPS5_HOST_PADS): 0x10000001.. ; user n's pad is handle 0x100 + n - 1 (the first one's
+// 0x809b0081 when shared)
+static int HostPads()
+{
+	const char* e = getenv("STELLAPS5_HOST_PADS");
+	const int n = e ? atoi(e) : 1;
+	return n < 1 ? 1 : n > 4 ? 4 : n;
+}
+static bool SignedIn(int i)
+{
+	InitEnv();
+	const auto it = g_signout.find(i);
+	return i >= 0 && i < HostPads() && (it == g_signout.end() || g_flips.load() < it->second);
+}
+static int UserIndex(int user)
+{
+	const int i = user - 0x10000001;
+	return i >= 0 && i < HostPads() ? i : -1;
+}
+// a pad opened twice fails (already opened) and scePadGetHandle hands out the open one, as on the console; a closed
+// pad's handle reads nothing
+int scePadOpen(int user, int, int, void*)
+{
+	const int i = UserIndex(user);
+	if (i < 0)
+		return (int)0x80920001; // (no such user)
+	if (i == 0 && PadShared())
+		return SCE_PAD_ERROR_ALREADY_OPENED;
+	if (g_pad_open[i])
+		return SCE_PAD_ERROR_ALREADY_OPENED;
+	g_pad_open[i] = true;
+	return 0x100 + i;
+}
+int scePadGetHandle(int user, int, int)
+{
+	const int i = UserIndex(user);
+	if (i < 0)
+		return (int)0x80920001;
+	if (i == 0 && PadShared())
+		return (int)0x809b0081;
+	return g_pad_open[i] ? 0x100 + i : (int)0x80920001;
+}
+int scePadReadState(int handle, ScePadData* data)
+{
+	InitEnv();
+	int pad = -1;
+	if (PadShared() && handle == (int)0x809b0081)
+		pad = 0;
+	else if (handle >= (PadShared() ? 0x101 : 0x100) && handle < 0x100 + HostPads() && g_pad_open[handle - 0x100])
+		pad = handle - 0x100;
+	if (pad < 0)
+		return (int)0x80920003; // invalid handle
+	static int drop_user = -1;
+	static uint64_t drop_from = 0, drop_to = 0;
+	if (const char* d = getenv("STELLAPS5_HOST_PAD_DROP"))
+	{
+		unsigned long long a = 0, b = 0;
+		int u = 0;
+		if (sscanf(d, "%d:%llu:%llu", &u, &a, &b) == 3)
+		{
+			drop_user = u - 1;
+			drop_from = a;
+			drop_to = b;
+		}
+	}
+	if (pad == drop_user && g_flips.load() >= drop_from && g_flips.load() < drop_to)
+		return (int)0x80920007; // a read that fails (a pad out of range for a moment)
+	memset(data, 0, sizeof(*data));
+	data->connected = 1;
+	data->leftStick.x = data->leftStick.y = 128;
+	data->rightStick.x = data->rightStick.y = 128;
+	const uint64_t now = g_flips.load();
+	auto it = g_script[pad].upper_bound(now);
+	if (it != g_script[pad].begin())
+	{
+		const PadStep& st = std::prev(it)->second;
+		data->buttons = st.buttons;
+		data->leftStick.x = st.lx;
+		data->leftStick.y = st.ly;
+		data->rightStick.x = st.rx;
+		data->rightStick.y = st.ry;
+	}
+	return 0;
+}
+int scePadSetLightBar(int, const ScePadColor*)
+{
+	return 0;
+}
+int scePadClose(int handle)
+{
+	if (handle >= 0x100 && handle < 0x104)
+		g_pad_open[handle - 0x100] = false;
+	return 0;
+}
+
+int sceUserServiceInitialize(void*)
+{
+	return 0;
+}
+int sceUserServiceGetForegroundUser(int32_t* user)
+{
+	*user = 0x10000001;
+	return 0;
+}
+int sceUserServiceGetLoginUserIdList(int32_t users[4])
+{
+	int n = 0;
+	for (int i = 0; i < 4; i++)
+		users[i] = -1;
+	for (int i = 0; i < 4; i++)
+		if (SignedIn(i))
+			users[n++] = 0x10000001 + i;
+	return 0;
+}
+
+// ---- network: libSceNetCtl says "connected" (STELLAPS5_HOST_OFFLINE=1: not), libSceHttp2 runs curl ----
+int sceNetInit(void) { return 0; }
+int sceNetPoolCreate(const char*, int, int) { return 1; }
+int sceNetPoolDestroy(int) { return 0; }
+int sceNetCtlInit(void) { return 0; }
+void sceNetCtlTerm(void) {}
+int sceNetCtlGetState(int* state)
+{
+	const char* o = getenv("STELLAPS5_HOST_OFFLINE");
+	*state = (o && *o && strcmp(o, "0") != 0) ? 0 : 3;
+	return 0;
+}
+int sceSslInit(size_t) { return 2; }
+int sceSslTerm(int) { return 0; }
+int sceHttp2Init(int, int, size_t, int) { return 3; }
+int sceHttp2Term(int) { return 0; }
+int sceHttp2CreateTemplate(int, const char*, int, int) { return 4; }
+int sceHttp2DeleteTemplate(int) { return 0; }
+}
+
+namespace
+{
+struct HostReq
+{
+	std::string url;
+	std::vector<uint8_t> body;
+	size_t off = 0;
+	int status = -1;
+};
+std::mutex g_req_lock;
+std::map<int, HostReq> g_reqs;
+int g_next_req = 100;
+std::atomic<int> g_http_count{0};
+}
+
+extern "C" {
+int sceHttp2CreateRequestWithURL(int, const char*, const char* url, uint64_t)
+{
+	std::lock_guard<std::mutex> lock(g_req_lock);
+	const int id = g_next_req++;
+	g_reqs[id].url = url;
+	return id;
+}
+int sceHttp2DeleteRequest(int req)
+{
+	std::lock_guard<std::mutex> lock(g_req_lock);
+	g_reqs.erase(req);
+	return 0;
+}
+int sceHttp2SendRequest(int req, const void*, size_t)
+{
+	std::string url;
+	{
+		std::lock_guard<std::mutex> lock(g_req_lock);
+		url = g_reqs[req].url;
+	}
+	g_http_count++;
+	char tmp[] = "/tmp/stella-http-XXXXXX";
+	const int fd = mkstemp(tmp);
+	if (fd < 0)
+		return -1;
+	close(fd);
+	std::string q;
+	for (char c : url)
+		q += c == '\'' ? std::string("'\\''") : std::string(1, c);
+	const std::string cmd = "curl -s -L --max-time 20 -o " + std::string(tmp) + " -w '%{http_code}' '" + q + "'";
+	FILE* p = popen(cmd.c_str(), "r");
+	int status = -1;
+	if (p)
+	{
+		char buf[32] = {};
+		if (fgets(buf, sizeof(buf), p))
+			status = atoi(buf);
+		pclose(p);
+	}
+	std::vector<uint8_t> body;
+	if (FILE* f = fopen(tmp, "rb"))
+	{
+		uint8_t b[65536];
+		size_t n;
+		while ((n = fread(b, 1, sizeof(b), f)) > 0)
+			body.insert(body.end(), b, b + n);
+		fclose(f);
+	}
+	unlink(tmp);
+	std::lock_guard<std::mutex> lock(g_req_lock);
+	g_reqs[req].status = status <= 0 ? -1 : status;
+	g_reqs[req].body.swap(body);
+	return status <= 0 ? (int)0x80000000 : 0;
+}
+int sceHttp2GetStatusCode(int req, int* status)
+{
+	std::lock_guard<std::mutex> lock(g_req_lock);
+	*status = g_reqs[req].status;
+	return 0;
+}
+int sceHttp2ReadData(int req, void* data, size_t size)
+{
+	std::lock_guard<std::mutex> lock(g_req_lock);
+	HostReq& r = g_reqs[req];
+	const size_t n = std::min(size, r.body.size() - r.off);
+	memcpy(data, r.body.data() + r.off, n);
+	r.off += n;
+	return int(n);
+}
+int sceHttp2SetResolveTimeOut(int, uint32_t) { return 0; }
+int sceHttp2SetConnectTimeOut(int, uint32_t) { return 0; }
+int sceHttp2SetSendTimeOut(int, uint32_t) { return 0; }
+int sceHttp2SetRecvTimeOut(int, uint32_t) { return 0; }
+int sceHttp2SetTimeOut(int, uint32_t) { return 0; }
+int sceHttp2SetAutoRedirect(int, int) { return 0; }
+int sceHttp2AbortRequest(int) { return 0; }
+}

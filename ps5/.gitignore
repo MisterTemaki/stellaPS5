@@ -1,0 +1,15 @@
+# Stella PS5 build outputs
+build/
+proto/native/build/
+*.o
+*.part
+
+# release files (published as GitHub Releases, not in the source)
+*.elf
+*.bundle
+*-src.zip
+
+# Stella's own .gitignore (at the top) leaves out every *.json, *.bak, "out" and "stella": not here
+!*.json
+!*.bak
+__pycache__/

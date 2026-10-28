@@ -1,0 +1,598 @@
+/*
+ * Gearlynx - Lynx Emulator
+ * Copyright (C) 2025  Ignacio Sanchez
+
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * any later version.
+
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see http://www.gnu.org/licenses/
+ *
+ */
+
+#include <algorithm>
+#include <limits>
+#include "game_drive.h"
+#include "sd_card_filesystem.h"
+#include "state_serializer.h"
+
+static char UpperCaseFileCharacter(char value)
+{
+    return (value >= 'a' && value <= 'z') ? value - 'a' + 'A' : value;
+}
+
+static bool FileNamesEqual(const char* left, const char* right)
+{
+    while (*left && *right)
+    {
+        if (UpperCaseFileCharacter(*left++) != UpperCaseFileCharacter(*right++))
+            return false;
+    }
+    return *left == *right;
+}
+
+static bool IsShortNameCharacter(char value)
+{
+    return (value >= 'A' && value <= 'Z') || (value >= '0' && value <= '9') ||
+        (value != 0 && strchr("$%'-_@~`!(){}^#&", value) != NULL);
+}
+
+static void BuildShortName(const char* file_name, char* short_name, u32 suffix)
+{
+    std::string name = file_name;
+    size_t dot = name.find_last_of('.');
+    std::string base = (dot == std::string::npos || dot == 0) ? name : name.substr(0, dot);
+    std::string extension = (dot == std::string::npos || dot == 0) ? "" : name.substr(dot + 1);
+    std::string clean_base;
+    std::string clean_extension;
+
+    for (size_t index = 0; index < base.size(); index++)
+    {
+        char value = UpperCaseFileCharacter(base[index]);
+        if (IsShortNameCharacter(value))
+            clean_base += value;
+    }
+
+    for (size_t index = 0; index < extension.size(); index++)
+    {
+        char value = UpperCaseFileCharacter(extension[index]);
+        if (IsShortNameCharacter(value))
+            clean_extension += value;
+    }
+
+    if (clean_base.empty())
+        clean_base = "FILE";
+    if (clean_base.size() > 8 && suffix == 0)
+        suffix = 1;
+    if (suffix > 0)
+    {
+        char tail[9];
+        snprintf(tail, sizeof(tail), "~%u", (unsigned int)MIN(suffix, 9999999U));
+        clean_base = clean_base.substr(0, 8 - strlen(tail)) + tail;
+    }
+    if (clean_extension.size() > 3)
+        clean_extension.resize(3);
+
+    std::string result = clean_base;
+    if (!clean_extension.empty())
+        result += "." + clean_extension;
+
+    memset(short_name, 0, 13);
+    memcpy(short_name, result.c_str(), MIN(result.size(), (size_t)12));
+}
+
+GameDrive::GameDrive()
+{
+    m_file_system = CreateSdCardFileSystem();
+    m_program_bank.resize(PROGRAM_BANK_SIZE);
+    m_available = false;
+    m_root_path = ".";
+    Reset(true);
+}
+
+GameDrive::~GameDrive()
+{
+    CloseFile();
+    SafeDelete(m_file_system);
+}
+
+void GameDrive::Configure(bool available, const char* root_path)
+{
+    m_root_path = (root_path && root_path[0]) ? root_path : ".";
+    m_available = available && m_file_system && m_file_system->IsAvailable() && m_file_system->IsValidRootPath(root_path);
+    Reset(true);
+}
+
+void GameDrive::Reset(bool hard)
+{
+    CloseFile();
+    m_awake = true;
+    m_command = NO_COMMAND;
+    m_expected_input = 0;
+    m_file_offset = 0;
+    m_file_size = 0;
+    m_output_offset = 0;
+    m_directory_index = 0;
+    m_open_file_guest_path.clear();
+    m_open_directory_guest_path.clear();
+    m_input.clear();
+    m_output.clear();
+    m_directory_entries.clear();
+
+    if (hard)
+    {
+        m_programmed = false;
+        std::fill(m_program_bank.begin(), m_program_bank.end(), 0);
+    }
+}
+
+void GameDrive::BeginCommand(u8 command)
+{
+    m_command = command;
+    m_input.clear();
+
+    switch (m_command)
+    {
+        case CMD_OPEN_DIR:
+        case CMD_OPEN_FILE:
+            m_expected_input = std::numeric_limits<u32>::max();
+            break;
+        case CMD_SEEK:
+        case CMD_CLEAR_BLOCKS:
+            m_expected_input = 4;
+            break;
+        case CMD_READ:
+        case CMD_WRITE:
+            m_expected_input = 2;
+            break;
+        case CMD_PROGRAM_FILE:
+            m_expected_input = 5;
+            break;
+        case CMD_READ_DIR:
+        case CMD_GET_SIZE:
+        case CMD_CLOSE:
+        case CMD_LOW_POWER:
+            m_expected_input = 0;
+            ExecuteCommand();
+            break;
+        default:
+            QueueResult(RESULT_NOT_ENABLED);
+            FinishCommand();
+            break;
+    }
+}
+
+void GameDrive::ProcessInput()
+{
+    if ((m_command == CMD_OPEN_DIR || m_command == CMD_OPEN_FILE) && !m_input.empty() && m_input.back() == 0)
+    {
+        ExecuteCommand();
+        return;
+    }
+
+    if ((m_command == CMD_OPEN_DIR || m_command == CMD_OPEN_FILE) && m_input.size() > MAX_GUEST_PATH_SIZE)
+    {
+        QueueResult(RESULT_NO_FILE);
+        FinishCommand();
+        return;
+    }
+
+    if (m_command == CMD_WRITE && m_input.size() == 2)
+        m_expected_input = 2 + InputWord(0);
+
+    if (m_input.size() >= m_expected_input)
+        ExecuteCommand();
+}
+
+void GameDrive::ExecuteCommand()
+{
+    switch (m_command)
+    {
+        case CMD_OPEN_DIR:
+        {
+            std::string path(reinterpret_cast<const char*>(&m_input[0]));
+            QueueResult(OpenDirectory(path) ? RESULT_OK : RESULT_NO_FILE);
+            break;
+        }
+        case CMD_READ_DIR:
+            if (m_directory_index >= m_directory_entries.size())
+                QueueResult(RESULT_NO_FILE);
+            else
+            {
+                const DirectoryEntry& entry = m_directory_entries[m_directory_index++];
+                QueueResult(RESULT_OK);
+                QueueDword(entry.size);
+                QueueWord(entry.date);
+                QueueWord(entry.time);
+                QueueByte(entry.attributes);
+                for (u32 index = 0; index < sizeof(entry.name); index++)
+                    QueueByte((u8)entry.name[index]);
+            }
+            break;
+        case CMD_OPEN_FILE:
+        {
+            std::string path(reinterpret_cast<const char*>(&m_input[0]));
+            QueueResult(OpenFile(path) ? RESULT_OK : RESULT_NO_FILE);
+            break;
+        }
+        case CMD_GET_SIZE:
+            QueueDword(m_file_open ? m_file_size : 0);
+            break;
+        case CMD_SEEK:
+            if (!m_file_open)
+                QueueResult(RESULT_NOT_OPENED);
+            else
+            {
+                m_file_offset = InputDword(0);
+                QueueResult(RESULT_OK);
+            }
+            break;
+        case CMD_READ:
+            if (!m_file_open)
+                QueueResult(RESULT_NOT_OPENED);
+            else
+            {
+                u16 size = InputWord(0);
+                u32 output_start = (u32)m_output.size();
+                m_output.resize(output_start + size);
+                ReadFileData(&m_output[output_start], size);
+                QueueResult(RESULT_OK);
+            }
+            break;
+        case CMD_WRITE:
+            if (!m_file_open)
+                QueueResult(RESULT_NOT_OPENED);
+            else if (!m_file_writable)
+                QueueResult(RESULT_DISK_ERROR);
+            else
+            {
+                u16 size = InputWord(0);
+                QueueResult(WriteFileData(&m_input[2], size) ? RESULT_OK : RESULT_DISK_ERROR);
+            }
+            break;
+        case CMD_CLOSE:
+            if (!m_file_open)
+                QueueResult(RESULT_NOT_OPENED);
+            else
+            {
+                CloseFile();
+                QueueResult(RESULT_OK);
+            }
+            break;
+        case CMD_PROGRAM_FILE:
+            if (!m_file_open)
+                QueueResult(RESULT_NOT_OPENED);
+            else
+            {
+                u16 start_block = InputWord(0);
+                u8 block_units = m_input[2] & 0x0F;
+                u16 block_count = InputWord(3);
+                u32 block_size = block_units * 256;
+
+                if ((block_units != 1 && block_units != 2 && block_units != 4 && block_units != 8) ||
+                    start_block >= PROGRAM_BLOCK_COUNT || block_count > PROGRAM_BLOCK_COUNT - start_block)
+                {
+                    QueueResult(RESULT_DISK_ERROR);
+                    break;
+                }
+
+                for (u32 block = 0; block < block_count; block++)
+                {
+                    u8* destination = &m_program_bank[(start_block + block) * PROGRAM_BLOCK_SIZE];
+                    std::fill(destination, destination + PROGRAM_BLOCK_SIZE, 0);
+                    ReadFileData(destination, block_size);
+                }
+
+                m_programmed = true;
+                QueueResult(RESULT_OK);
+            }
+            break;
+        case CMD_CLEAR_BLOCKS:
+        {
+            u16 start_block = InputWord(0);
+            u16 block_count = InputWord(2) & 0x7FFF;
+
+            if (start_block >= PROGRAM_BLOCK_COUNT || block_count > PROGRAM_BLOCK_COUNT - start_block)
+                QueueResult(RESULT_DISK_ERROR);
+            else
+            {
+                u8* first = &m_program_bank[start_block * PROGRAM_BLOCK_SIZE];
+                std::fill(first, first + block_count * PROGRAM_BLOCK_SIZE, 0);
+                m_programmed = true;
+                QueueResult(RESULT_OK);
+            }
+            break;
+        }
+        case CMD_LOW_POWER:
+            m_awake = false;
+            break;
+        default:
+            QueueResult(RESULT_NOT_ENABLED);
+            break;
+    }
+
+    FinishCommand();
+}
+
+bool GameDrive::BuildHostPath(const std::string& guest_path, std::string& host_path) const
+{
+    std::string path = guest_path;
+    std::replace(path.begin(), path.end(), '\\', '/');
+
+    if (path.find(':') != std::string::npos)
+        return false;
+
+    std::vector<std::string> parts;
+    size_t offset = 0;
+
+    while (offset <= path.size())
+    {
+        size_t separator = path.find('/', offset);
+        std::string part = path.substr(offset, separator - offset);
+
+        if (part == "..")
+            return false;
+        if (!part.empty() && part != ".")
+            parts.push_back(part);
+
+        if (separator == std::string::npos)
+            break;
+        offset = separator + 1;
+    }
+
+    host_path = m_root_path;
+    for (size_t i = 0; i < parts.size(); i++)
+    {
+        std::string exact_path = host_path;
+        append_path_component(exact_path, parts[i].c_str());
+        bool directory = false;
+        u32 size = 0;
+        if (m_file_system->GetFileInfo(exact_path.c_str(), directory, size))
+        {
+            host_path = exact_path;
+            continue;
+        }
+
+        std::vector<DirectoryEntry> entries;
+        if (!ReadDirectoryEntries(host_path, entries))
+            return false;
+
+        const DirectoryEntry* match = NULL;
+        for (size_t index = 0; index < entries.size(); index++)
+        {
+            if (FileNamesEqual(parts[i].c_str(), entries[index].name))
+            {
+                match = &entries[index];
+                break;
+            }
+        }
+
+        if (!match)
+        {
+            for (size_t index = 0; index < entries.size(); index++)
+            {
+                if (FileNamesEqual(parts[i].c_str(), entries[index].host_name.c_str()))
+                {
+                    if (match)
+                        return false;
+                    match = &entries[index];
+                }
+            }
+        }
+
+        if (!match)
+            return false;
+        append_path_component(host_path, match->host_name.c_str());
+    }
+
+    return true;
+}
+
+bool GameDrive::OpenFile(const std::string& guest_path)
+{
+    CloseFile();
+
+    std::string host_path;
+    if (!BuildHostPath(guest_path, host_path))
+        return false;
+
+    u32 size = 0;
+    if (!m_file_system->OpenFile(host_path.c_str(), m_file_writable, size))
+        return false;
+
+    m_file_open = true;
+    m_file_offset = 0;
+    m_file_size = size;
+    m_open_file_guest_path = guest_path;
+    return true;
+}
+
+bool GameDrive::OpenDirectory(const std::string& guest_path)
+{
+    std::string host_path;
+    if (!BuildHostPath(guest_path, host_path))
+        return false;
+
+    m_directory_entries.clear();
+    m_directory_index = 0;
+
+    if (!ReadDirectoryEntries(host_path, m_directory_entries))
+        return false;
+
+    m_open_directory_guest_path = guest_path;
+    return true;
+}
+
+bool GameDrive::ReadDirectoryEntries(const std::string& host_path, std::vector<DirectoryEntry>& entries) const
+{
+    std::vector<SdCardFileSystemEntry> file_system_entries;
+    if (!m_file_system->ReadDirectory(host_path.c_str(), file_system_entries))
+        return false;
+
+    // Assign aliases in host-name order, independent of filesystem enumeration order.
+    std::sort(file_system_entries.begin(), file_system_entries.end(),
+        [](const SdCardFileSystemEntry& left, const SdCardFileSystemEntry& right)
+        {
+            return left.name < right.name;
+        });
+
+    entries.clear();
+    for (size_t index = 0; index < file_system_entries.size(); index++)
+    {
+        const SdCardFileSystemEntry& file_system_entry = file_system_entries[index];
+        DirectoryEntry entry = {};
+        entry.size = (u32)MIN(file_system_entry.size, 0xFFFFFFFFULL);
+        entry.date = file_system_entry.date;
+        entry.time = file_system_entry.time;
+        entry.attributes = file_system_entry.directory ? 0x10 : 0x20;
+        if (file_system_entry.read_only)
+            entry.attributes |= 0x01;
+        if (file_system_entry.hidden)
+            entry.attributes |= 0x02;
+        entry.host_name = file_system_entry.name;
+        entries.push_back(entry);
+    }
+
+    u32 next_suffix = 1;
+    for (size_t index = 0; index < entries.size(); index++)
+    {
+        DirectoryEntry& entry = entries[index];
+        BuildShortName(entry.host_name.c_str(), entry.name, 0);
+
+        for (;;)
+        {
+            bool collision = false;
+            for (size_t other = 0; other < entries.size(); other++)
+            {
+                // Reserve host names too, so an alias cannot open a different literal file.
+                if ((other < index && FileNamesEqual(entry.name, entries[other].name)) ||
+                    (other != index && FileNamesEqual(entry.name, entries[other].host_name.c_str())))
+                {
+                    collision = true;
+                    break;
+                }
+            }
+
+            if (!collision)
+                break;
+            if (next_suffix > 9999999)
+                return false;
+            BuildShortName(entry.host_name.c_str(), entry.name, next_suffix++);
+        }
+    }
+
+    std::sort(entries.begin(), entries.end(),
+        [](const DirectoryEntry& left, const DirectoryEntry& right)
+        {
+            return strcmp(left.name, right.name) < 0;
+        });
+
+    return true;
+}
+
+void GameDrive::CloseFile()
+{
+    if (m_file_system)
+        m_file_system->CloseFile();
+    m_file_open = false;
+    m_file_writable = false;
+    m_file_offset = 0;
+    m_file_size = 0;
+    m_open_file_guest_path.clear();
+}
+
+void GameDrive::ReadFileData(u8* data, u32 size)
+{
+    memset(data, 0, size);
+
+    if (m_file_offset < m_file_size)
+    {
+        u32 readable = MIN(size, m_file_size - m_file_offset);
+        m_file_system->ReadFile(m_file_offset, data, readable);
+    }
+
+    m_file_offset += size;
+}
+
+bool GameDrive::WriteFileData(const u8* data, u32 size)
+{
+    if (!m_file_system->WriteFile(m_file_offset, data, size))
+        return false;
+
+    m_file_offset += size;
+    m_file_size = MAX(m_file_size, m_file_offset);
+    return true;
+}
+
+void GameDrive::SaveState(std::ostream& stream)
+{
+    StateSerializer serializer(stream);
+    Serialize(serializer, GLYNX_SAVESTATE_VERSION);
+}
+
+void GameDrive::LoadState(std::istream& stream, int version)
+{
+    CloseFile();
+    StateSerializer serializer(stream);
+    Serialize(serializer, version);
+}
+
+void GameDrive::Serialize(StateSerializer& serializer, int version)
+{
+    G_SERIALIZE(serializer, m_awake);
+    if (version < 29)
+    {
+        bool legacy_low_power = false;
+        G_SERIALIZE(serializer, legacy_low_power);
+    }
+    G_SERIALIZE(serializer, m_programmed);
+    G_SERIALIZE(serializer, m_file_open);
+    G_SERIALIZE(serializer, m_command);
+    G_SERIALIZE(serializer, m_expected_input);
+    G_SERIALIZE(serializer, m_file_offset);
+    G_SERIALIZE(serializer, m_output_offset);
+    G_SERIALIZE(serializer, m_directory_index);
+    serializer.SerializeString(m_open_file_guest_path, MAX_GUEST_PATH_SIZE);
+    serializer.SerializeString(m_open_directory_guest_path, MAX_GUEST_PATH_SIZE);
+    serializer.SerializeVector(m_input, MAX_COMMAND_BUFFER_SIZE);
+    serializer.SerializeVector(m_output, MAX_COMMAND_BUFFER_SIZE);
+
+    if (!serializer.IsValid())
+        return;
+
+    if (m_programmed)
+        G_SERIALIZE_ARRAY(serializer, &m_program_bank[0], m_program_bank.size());
+    else if (serializer.IsLoading())
+        std::fill(m_program_bank.begin(), m_program_bank.end(), 0);
+
+    if (serializer.IsLoading())
+    {
+        if (!serializer.IsValid())
+            return;
+        bool restore_file = m_file_open;
+        u32 restore_offset = m_file_offset;
+        std::string restore_file_path = m_open_file_guest_path;
+        std::string restore_directory_path = m_open_directory_guest_path;
+        u32 restore_directory_index = m_directory_index;
+
+        m_file_open = false;
+        m_file_writable = false;
+        m_file_size = 0;
+
+        if (restore_file && OpenFile(restore_file_path))
+            m_file_offset = restore_offset;
+
+        if (!restore_directory_path.empty() && OpenDirectory(restore_directory_path))
+            m_directory_index = MIN(restore_directory_index, (u32)m_directory_entries.size());
+
+        if (m_output_offset > m_output.size())
+            m_output_offset = (u32)m_output.size();
+    }
+}

@@ -1,0 +1,315 @@
+/*
+ * Gearlynx - Lynx Emulator
+ * Copyright (C) 2025  Ignacio Sanchez
+
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * any later version.
+
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see http://www.gnu.org/licenses/
+ *
+ */
+
+#include <stdlib.h>
+#include "memory.h"
+#include "media.h"
+#include "input.h"
+#include "audio.h"
+#include "suzy.h"
+#include "mikey.h"
+#include "m6502.h"
+#include "bus.h"
+#include "random.h"
+#include "state_serializer.h"
+
+Memory::Memory(Media* media, Input* input, Suzy* suzy, Mikey* mikey, M6502* m6502, Bus* bus, Random* random)
+{
+    m_media = media;
+    m_input = input;
+    m_suzy = suzy;
+    m_mikey = mikey;
+    m_m6502 = m6502;
+    m_bus = bus;
+    m_random = random;
+    InitPointer(m_disassembler);
+    InitPointer(m_state.ram);
+    m_state.MAPCTL = 0;
+    m_is_lynx2 = true;
+    m_cheat_count = 0;
+
+    for (int i = 0; i < 4; i++)
+    {
+        m_read_page[i] = NULL;
+        m_write_page[i] = NULL;
+        m_read_fn[i] = NULL;
+        m_write_fn[i] = NULL;
+        m_read_fn_debug[i] = NULL;
+        m_write_fn_debug[i] = NULL;
+    }
+}
+
+Memory::~Memory()
+{
+    SafeDeleteArray(m_state.ram);
+
+    if (IsValidPointer(m_disassembler))
+    {
+        for (int i = 0; i < 0x200000; i++)
+        {
+            SafeDelete(m_disassembler[i]);
+        }
+        SafeDeleteArray(m_disassembler);
+    }
+}
+
+void Memory::Init()
+{
+#if !defined(GLYNX_DISABLE_DISASSEMBLER)
+    m_disassembler = new GLYNX_Disassembler_Record*[0x200000];
+    for (int i = 0; i < 0x200000; i++)
+    {
+        InitPointer(m_disassembler[i]);
+    }
+#endif
+
+    m_state.ram = new u8[0x10000];
+
+    Reset(true);
+}
+
+void Memory::Reset(bool is_lynx2)
+{
+    m_state.MAPCTL = 0;
+    m_is_lynx2 = is_lynx2;
+
+    for (int i = 0; i < 0x10000; i += 4)
+    {
+        u32 rnd = m_random->Next();
+        m_state.ram[i] = (u8)rnd;
+        m_state.ram[i + 1] = (u8)(rnd >> 8);
+        m_state.ram[i + 2] = (u8)(rnd >> 16);
+        m_state.ram[i + 3] = (u8)(rnd >> 24);
+    }
+
+    SetupDefaultMemoryMap();
+}
+
+GLYNX_Disassembler_Record* Memory::GetDisassemblerRecord(u16 address)
+{
+    return m_disassembler[address];
+}
+
+GLYNX_Disassembler_Record* Memory::GetOrCreateDisassemblerRecord(u16 address)
+{
+    GLYNX_Disassembler_Record* record = m_disassembler[address];
+
+    if (!IsValidPointer(record))
+    {
+        record = new GLYNX_Disassembler_Record();
+        record->rom = false;
+        record->address = address;
+        record->segment[0] = 0;
+        record->name[0] = 0;
+        record->bytes[0] = 0;
+        record->size = 0;
+        for (int i = 0; i < 3; i++)
+            record->opcodes[i] = 0;
+        record->jump = false;
+        record->jump_address = 0;
+        record->subroutine = false;
+        record->irq = 0;
+        record->has_operand_address = false;
+        record->operand_address = 0;
+        record->operand_is_zp = false;
+        record->operand_offset = 0;
+        record->operand_length = 0;
+        record->auto_symbol[0] = 0;
+        m_disassembler[address] = record;
+    }
+
+    return record;
+}
+
+bool Memory::CanAddCheats(int count)
+{
+    return (m_cheat_count + count) <= GLYNX_MAX_CHEATS;
+}
+
+void Memory::AddCheat(const GLYNX_Cheat& cheat)
+{
+    if (m_cheat_count >= GLYNX_MAX_CHEATS)
+        return;
+
+    m_cheats[m_cheat_count] = cheat;
+    m_cheat_count++;
+}
+
+void Memory::ClearCheats()
+{
+    m_cheat_count = 0;
+}
+
+void Memory::ResetDisassemblerRecords()
+{
+#if !defined(GLYNX_DISABLE_DISASSEMBLER)
+    for (int i = 0; i < 0x200000; i++)
+    {
+        SafeDelete(m_disassembler[i]);
+    }
+#endif
+}
+
+GLYNX_Disassembler_Record** Memory::GetAllDisassemblerRecords()
+{
+    return m_disassembler;
+}
+
+void Memory::SetupDefaultMemoryMap()
+{
+    m_read_page[3] = NULL;
+    m_write_page[3] = NULL;
+    m_read_fn[3] = &Memory::LastPageRead;
+    m_write_fn[3] = &Memory::LastPageWrite;
+    m_read_fn_debug[3] = &Memory::LastPageRead;
+    m_write_fn_debug[3] = &Memory::LastPageWrite;
+
+    RebuildMemoryMap();
+}
+
+u8 Memory::SuzyRead(u16 address)
+{
+    return m_suzy->Read(address);
+}
+
+void Memory::SuzyWrite(u16 address, u8 value)
+{
+    m_suzy->Write(address, value);
+}
+
+u8 Memory::MikeyRead(u16 address)
+{
+    return m_mikey->Read(address);
+}
+
+void Memory::MikeyWrite(u16 address, u8 value)
+{
+    m_mikey->Write(address, value);
+}
+
+u8 Memory::SuzyReadDebug(u16 address)
+{
+    return m_suzy->Read<true>(address);
+}
+
+void Memory::SuzyWriteDebug(u16 address, u8 value)
+{
+    m_suzy->Write<true>(address, value);
+}
+
+u8 Memory::MikeyReadDebug(u16 address)
+{
+    return m_mikey->Read<true>(address);
+}
+
+void Memory::MikeyWriteDebug(u16 address, u8 value)
+{
+    m_mikey->Write<true>(address, value);
+}
+
+u8 Memory::BiosRead(u16 address)
+{
+    // BIOS not visible
+    if (IS_SET_BIT(m_state.MAPCTL, 2))
+    {
+        return m_state.ram[address];
+    }
+    // BIOS visible
+    else
+    {
+        u8* bios = m_media->GetBIOS();
+        return bios[address & 0x1FF];
+    }
+}
+
+u8 Memory::LastPageRead(u16 address)
+{
+    if (address < 0xFFF8)
+    {
+        // BIOS not visible
+        if (IS_SET_BIT(m_state.MAPCTL, 2))
+        {
+            return m_state.ram[address];
+        }
+        // BIOS visible
+        else
+        {
+            u8* bios = m_media->GetBIOS();
+            return bios[address & 0x1FF];
+        }
+    }
+    else if (address > 0xFFF9)
+    {
+        // VECTORS not visible
+        if (IS_SET_BIT(m_state.MAPCTL, 3))
+        {
+            return m_state.ram[address];
+        }
+        // VECTORS visible
+        else
+        {
+            u8* bios = m_media->GetBIOS();
+            return bios[address & 0x1FF];
+        }
+    }
+    else if (unlikely(address == 0xFFF8))
+    {
+        Debug("Reading from address 0xFFF8");
+        return m_state.ram[address];
+    }
+    else
+    {
+        Error("LastPageRead called with invalid address: %04X", address);
+        return m_state.ram[address];
+    }
+}
+
+void Memory::LastPageWrite(u16 address, u8 value)
+{
+    if (unlikely(address == 0xFFF8))
+    {
+        Debug("Writing to address 0xFFF8 with value %02X", value);
+        m_state.ram[address] = value;
+    }
+    else
+    {
+        m_state.ram[address] = value;
+    }
+}
+
+void Memory::SaveState(std::ostream& stream)
+{
+    StateSerializer serializer(stream);
+    Serialize(serializer, GLYNX_SAVESTATE_VERSION);
+}
+
+void Memory::LoadState(std::istream& stream, int version)
+{
+    StateSerializer serializer(stream);
+    Serialize(serializer, version);
+    RebuildMemoryMap();
+}
+
+void Memory::Serialize(StateSerializer& s, int version)
+{
+    if (version >= 13)
+        G_SERIALIZE(s, m_is_lynx2);
+    G_SERIALIZE(s, m_state.MAPCTL);
+    G_SERIALIZE_ARRAY(s, m_state.ram, 0x10000);
+}

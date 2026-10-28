@@ -1,0 +1,829 @@
+// Stella PS5 frontend: covers (fe_covers.h).
+// SPDX-License-Identifier: MIT
+
+#include "fe_covers.h"
+
+#include "fe_coverworker.h"
+#include "fe_text.h"
+
+#include "OrbisPaths.h"
+#include "ProsperoCrash.h"
+
+#include <strings.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include <algorithm>
+#include <chrono>
+#include <cctype>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <ctime>
+
+#define STB_IMAGE_IMPLEMENTATION
+#define STB_IMAGE_STATIC
+#define STBI_ONLY_JPEG
+#define STBI_ONLY_PNG
+#define STBI_NO_STDIO
+// a cover is a few hundred pixels: a bigger image (a broken or hostile file) is refused before stb_image
+// allocates for it (its default limit, 2^24 pixels a side, would let one PNG ask for gigabytes)
+#define STBI_MAX_DIMENSIONS 8192
+#include "third_party/stb_image.h"
+
+#define STB_IMAGE_RESIZE_IMPLEMENTATION
+#define STB_IMAGE_RESIZE_STATIC
+#include "third_party/stb_image_resize2.h"
+
+namespace fe
+{
+namespace
+{
+constexpr int kLoadRadius = 12; // textures kept around the selection
+constexpr long kMissingRetrySeconds = 30L * 24 * 3600;
+
+// the status line's counter: the worker counts down, Refetch (another thread) up
+void DecrementToZero(std::atomic<int>& a)
+{
+	int v = a.load();
+	while (v > 0 && !a.compare_exchange_weak(v, v - 1))
+	{
+	}
+}
+
+const char* const kDefaultUrl =
+	"https://raw.githubusercontent.com/libretro-thumbnails/${repo}/master/Named_Boxarts/${name}.png";
+
+std::string CoverUrlTemplate()
+{
+	const char* env = getenv("STELLAPS5_COVER_URL"); // the host tests point this at a local server
+	return env && *env ? env : kDefaultUrl;
+}
+
+bool ReadFile(const std::string& path, std::vector<uint8_t>& out)
+{
+	FILE* f = fopen(path.c_str(), "rb");
+	if (!f)
+		return false;
+	out.clear();
+	uint8_t buf[65536];
+	size_t n;
+	while ((n = fread(buf, 1, sizeof(buf), f)) > 0)
+	{
+		out.insert(out.end(), buf, buf + n);
+		if (out.size() > (32u << 20))
+			break;
+	}
+	fclose(f);
+	return !out.empty();
+}
+
+bool WriteFileAtomic(const std::string& path, const std::vector<uint8_t>& data)
+{
+	const std::string tmp = path + ".part";
+	FILE* f = fopen(tmp.c_str(), "wb");
+	if (!f)
+		return false;
+	bool ok = data.empty() || fwrite(data.data(), 1, data.size(), f) == data.size(); // (an empty list: no fwrite of a null pointer)
+	ok = fflush(f) == 0 && ok;
+	ok = fsync(fileno(f)) == 0 && ok;
+	ok = fclose(f) == 0 && ok;
+	if (!ok || rename(tmp.c_str(), path.c_str()) != 0)
+	{
+		unlink(tmp.c_str());
+		return false;
+	}
+	return true;
+}
+
+bool NonEmptyFile(const std::string& path)
+{
+	struct stat st = {};
+	return stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0;
+}
+
+std::string FindWithExts(const std::string& base)
+{
+	static const char* const exts[] = {".png", ".jpg", ".jpeg", ".PNG", ".JPG"};
+	for (const char* e : exts)
+		if (NonEmptyFile(base + e))
+			return base + e;
+	return "";
+}
+
+// Square on the shelf: "<cover>.refetch" asks for the cover again. The cover itself stays where it is until a new
+// one is saved over it (atomically), so a refetch that fails (offline, 404, no restart) never loses it.
+std::string RefetchMarker(const std::string& cover)
+{
+	return cover.substr(0, cover.size() - 4) + ".refetch";
+}
+
+bool Exists(const std::string& path)
+{
+	struct stat st = {};
+	return stat(path.c_str(), &st) == 0;
+}
+
+bool RecentlyMissing(const std::string& marker)
+{
+	struct stat st = {};
+	if (stat(marker.c_str(), &st) != 0)
+		return false;
+	return time(nullptr) - st.st_mtime < kMissingRetrySeconds;
+}
+
+uint32_t Pack(int r, int g, int b)
+{
+	return 0xff000000u | (uint32_t(std::clamp(b, 0, 255)) << 16) | (uint32_t(std::clamp(g, 0, 255)) << 8) |
+		   uint32_t(std::clamp(r, 0, 255));
+}
+
+// Row-major RGBA (h rows of w) -> a CoverTex with 3 levels, column-major.
+std::shared_ptr<CoverTex> MakeTex(const uint32_t* rgba, int w, int h)
+{
+	auto tex = std::make_shared<CoverTex>();
+	std::vector<uint32_t> level(rgba, rgba + size_t(w) * h);
+	int lw = w, lh = h;
+	uint64_t sr = 0, sg = 0, sb = 0;
+	for (int l = 0; l < CoverTex::kLevels; l++)
+	{
+		tex->w[l] = lw;
+		tex->h[l] = lh;
+		tex->px[l].resize(size_t(lw) * lh);
+		for (int y = 0; y < lh; y++)
+			for (int x = 0; x < lw; x++)
+				tex->px[l][size_t(x) * lh + y] = level[size_t(y) * lw + x];
+		if (l + 1 == CoverTex::kLevels)
+		{
+			for (uint32_t p : level)
+			{
+				sr += p & 0xff;
+				sg += (p >> 8) & 0xff;
+				sb += (p >> 16) & 0xff;
+			}
+			const uint64_t n = std::max<uint64_t>(1, level.size());
+			tex->average = Pack(int(sr / n), int(sg / n), int(sb / n));
+			break;
+		}
+		// 2x2 box down
+		const int nw = std::max(1, lw / 2), nh = std::max(1, lh / 2);
+		std::vector<uint32_t> next(size_t(nw) * nh);
+		for (int y = 0; y < nh; y++)
+			for (int x = 0; x < nw; x++)
+			{
+				const uint32_t* r0 = &level[size_t(std::min(2 * y, lh - 1)) * lw];
+				const uint32_t* r1 = &level[size_t(std::min(2 * y + 1, lh - 1)) * lw];
+				const int x0 = std::min(2 * x, lw - 1), x1 = std::min(2 * x + 1, lw - 1);
+				const uint32_t a = r0[x0], b = r0[x1], c = r1[x0], d = r1[x1];
+				uint32_t out = 0xff000000u;
+				for (int sh = 0; sh < 24; sh += 8)
+				{
+					const uint32_t v = (((a >> sh) & 0xff) + ((b >> sh) & 0xff) + ((c >> sh) & 0xff) + ((d >> sh) & 0xff) + 2) / 4;
+					out |= v << sh;
+				}
+				next[size_t(y) * nw + x] = out;
+			}
+		level.swap(next);
+		lw = nw;
+		lh = nh;
+	}
+	return tex;
+}
+
+std::shared_ptr<CoverTex> Decode(const std::vector<uint8_t>& file)
+{
+	int w = 0, h = 0, comp = 0;
+	stbi_uc* img = stbi_load_from_memory(file.data(), int(file.size()), &w, &h, &comp, 4);
+	if (!img || w < 8 || h < 8)
+	{
+		if (img)
+			stbi_image_free(img);
+		return nullptr;
+	}
+	// level 0: kCoverTexH tall, the art's own aspect (kept between 0.5:1 and 1.6:1)
+	const float aspect = std::clamp(float(w) / float(h), 0.5f, 1.6f);
+	const int th = kCoverTexH;
+	const int tw = int(std::lround(th * aspect)) & ~3;
+	std::vector<uint32_t> out(size_t(tw) * th);
+	stbir_resize_uint8_srgb(img, w, h, 0, reinterpret_cast<unsigned char*>(out.data()), tw, th, 0, STBIR_RGBA);
+	stbi_image_free(img);
+	for (uint32_t& p : out)
+		p |= 0xff000000u; // covers are opaque
+	return MakeTex(out.data(), tw, th);
+}
+
+// What the card says under the title: the year and the maker from Stella's name for the game ("Pitfall! (1982)
+// (Activision)" -> "1982 - Activision"), else No-Intro's region, else nothing.
+std::string CardDetails(const GameInfo& g)
+{
+	if (!g.stella.empty())
+	{
+		std::string out;
+		size_t a = g.stella.find(" (");
+		while (a != std::string::npos)
+		{
+			const size_t b = g.stella.find(')', a);
+			if (b == std::string::npos)
+				break;
+			const std::string tag = g.stella.substr(a + 2, b - a - 2);
+			if (!tag.empty() && out.size() < 60)
+				out += (out.empty() ? "" : " - ") + tag;
+			a = g.stella.find(" (", b);
+		}
+		if (!out.empty())
+			return out;
+	}
+	return g.system == System::A2600 ? g.region : std::string(Info(g.system).name) + (g.region.empty() ? "" : " - " + g.region);
+}
+
+std::shared_ptr<CoverTex> Placeholder(const GameInfo& g)
+{
+	const int w = 720, h = kCoverTexH;
+	std::vector<uint32_t> px(size_t(w) * h);
+	// a dark walnut card: a brown gradient with a faint grain (stripes that wander a little), as the console's
+	// woodgrain front, no logo
+	for (int y = 0; y < h; y++)
+	{
+		const float t = float(y) / h;
+		for (int x = 0; x < w; x++)
+		{
+			const float grain = 0.5f + 0.5f * std::sin(x * 0.045f + 3.0f * std::sin(y * 0.011f + x * 0.002f));
+			const int k = int(10 * grain);
+			px[size_t(y) * w + x] = Pack(int(78 - 40 * t) + k, int(48 - 26 * t) + k / 2, int(26 - 14 * t) + k / 3);
+		}
+	}
+	// frame
+	const uint32_t edge = Pack(232, 142, 58);
+	for (int i = 0; i < 6; i++)
+		for (int x = 0; x < w; x++)
+		{
+			px[size_t(i) * w + x] = edge;
+			px[size_t(h - 1 - i) * w + x] = edge;
+		}
+	for (int y = 0; y < h; y++)
+		for (int i = 0; i < 6; i++)
+		{
+			px[size_t(y) * w + i] = edge;
+			px[size_t(y) * w + w - 1 - i] = edge;
+		}
+	// top right, the system's controller in brief, drawn with plain shapes (no logo, no real product's art):
+	//   2600: a one-button joystick -- a black square base with a lighter rim, the red fire button in its top left
+	//         corner, the stick rising from its middle
+	//   5200: a keypad controller -- a dark body, a short stick at the top, a 3 x 4 grid of light keys
+	//   7800: a joystick with a button on each side of its base
+	//   Lynx: a handheld lying wide -- a grey body, a green screen in the middle, a cross-shaped pad left, two buttons right
+	{
+		auto disc = [&](int cx, int cy, int rad, uint32_t c) {
+			for (int y = -rad; y <= rad; y++)
+				for (int x = -rad; x <= rad; x++)
+					if (x * x + y * y <= rad * rad)
+						px[size_t(cy + y) * w + cx + x] = c;
+		};
+		// a rectangle with rounded corners
+		auto box = [&](int left, int top, int right, int bottom, int r, uint32_t c) {
+			for (int y = top; y <= bottom; y++)
+				for (int x = left; x <= right; x++)
+				{
+					const int dx = x < left + r ? left + r - x : x > right - r ? x - (right - r) : 0;
+					const int dy = y < top + r ? top + r - y : y > bottom - r ? y - (bottom - r) : 0;
+					if (dx * dx + dy * dy <= r * r)
+						px[size_t(y) * w + x] = c;
+				}
+		};
+		const uint32_t rim = Pack(84, 84, 90), base = Pack(22, 22, 26), stick = Pack(14, 14, 16),
+					   stick_hi = Pack(70, 70, 78), button = Pack(198, 36, 30), shine = Pack(240, 130, 110);
+		switch (g.system)
+		{
+			case System::A5200:
+			{
+				const uint32_t key = Pack(196, 192, 182), body = Pack(30, 30, 34);
+				box(w - 180, 20, w - 50, 116, 14, rim);
+				box(w - 174, 26, w - 56, 110, 10, body);
+				disc(w - 115, 42, 12, stick); // the stick's knob, short
+				disc(w - 118, 39, 4, stick_hi);
+				for (int r = 0; r < 4; r++)
+					for (int k = 0; k < 3; k++)
+						box(w - 150 + k * 26, 60 + r * 12, w - 134 + k * 26, 68 + r * 12, 2, key);
+				box(w - 172, 64, w - 160, 76, 3, button); // the side fire buttons
+				box(w - 70, 64, w - 58, 76, 3, button);
+				break;
+			}
+			case System::A7800:
+				box(w - 196, 70, w - 40, 116, 12, rim);
+				box(w - 190, 76, w - 46, 110, 9, base);
+				box(w - 128, 28, w - 108, 94, 8, stick); // a thicker grip
+				box(w - 124, 32, w - 120, 80, 1, stick_hi);
+				disc(w - 146, 48, 9, button); // a button on each side of the grip
+				disc(w - 90, 48, 9, button);
+				disc(w - 148, 46, 3, shine);
+				disc(w - 92, 46, 3, shine);
+				break;
+			case System::Lynx:
+			{
+				const uint32_t body = Pack(70, 70, 76), screen = Pack(92, 150, 92), pad = Pack(20, 20, 24);
+				box(w - 236, 44, w - 30, 116, 22, rim);
+				box(w - 230, 50, w - 36, 110, 18, body);
+				box(w - 172, 58, w - 94, 102, 4, screen);
+				box(w - 214, 74, w - 186, 84, 2, pad); // the cross-shaped pad
+				box(w - 205, 65, w - 195, 93, 2, pad);
+				disc(w - 68, 72, 8, button);
+				disc(w - 50, 88, 8, button);
+				break;
+			}
+			default:
+				box(w - 196, 58, w - 40, 116, 12, rim);
+				box(w - 190, 64, w - 46, 110, 9, base);
+				disc(w - 166, 80, 11, button); // the fire button
+				disc(w - 169, 77, 3, shine);
+				box(w - 125, 20, w - 111, 92, 6, stick); // the stick and its collar
+				box(w - 122, 24, w - 119, 70, 1, stick_hi);
+				box(w - 136, 86, w - 100, 98, 6, stick);
+				break;
+		}
+	}
+
+	Canvas canvas{px.data(), w, h, w};
+	// the title, word-wrapped, up to 4 lines
+	std::vector<std::string> lines;
+	std::string cur;
+	size_t pos = 0;
+	const std::string& t = g.title;
+	while (pos <= t.size())
+	{
+		size_t sp = t.find(' ', pos);
+		if (sp == std::string::npos)
+			sp = t.size();
+		const std::string word = t.substr(pos, sp - pos);
+		const std::string tryline = cur.empty() ? word : cur + " " + word;
+		if (!cur.empty() && TextWidth(tryline.c_str(), 5) > w - 80)
+		{
+			lines.push_back(cur);
+			cur = word;
+		}
+		else
+			cur = tryline;
+		pos = sp + 1;
+	}
+	if (!cur.empty())
+		lines.push_back(cur);
+	if (lines.size() > 4)
+	{
+		lines.resize(4);
+		lines[3] = FitText(lines[3] + "...", 5, w - 80);
+	}
+	// y is each line's baseline: the first line's letters stay below the joystick (top right, down to y 116), so a
+	// title of two or more lines is moved down rather than drawn over it
+	int y = std::max(162, 190 - int(lines.size()) * 28);
+	for (const std::string& l : lines)
+	{
+		const std::string fit = FitText(l, 5, w - 80);
+		DrawTextOn(canvas, (w - TextWidth(fit.c_str(), 5)) / 2, y, fit.c_str(), 5, Pack(240, 240, 250));
+		y += 58;
+	}
+	const std::string sub = FitText(CardDetails(g), 3, w - 80);
+	if (!sub.empty())
+		DrawTextOn(canvas, (w - TextWidth(sub.c_str(), 3)) / 2, h - 80, sub.c_str(), 3, Pack(236, 190, 140));
+	auto tex = MakeTex(px.data(), w, h);
+	tex->source = "placeholder";
+	return tex;
+}
+} // namespace
+
+std::string ThumbnailName(const std::string& nointro)
+{
+	std::string s = nointro;
+	for (char& c : s)
+		if (strchr("&*/:`<>?\\|\"", c))
+			c = '_';
+	return s;
+}
+
+namespace
+{
+std::atomic<bool> g_shelf_downloads{true};
+}
+
+void SetShelfDownloads(bool on)
+{
+	g_shelf_downloads = on;
+}
+
+bool ShelfDownloads()
+{
+	return g_shelf_downloads;
+}
+
+std::string CoverUrlFor(const GameInfo& g)
+{
+	std::string url = CoverUrlTemplate();
+	size_t p = url.find("${repo}");
+	if (p != std::string::npos)
+		url.replace(p, 7, Info(g.system).thumbs);
+	p = url.find("${name}");
+	if (p != std::string::npos)
+		url.replace(p, 7, UrlEncode(ThumbnailName(g.nointro)));
+	return url;
+}
+
+std::string OwnCover(const GameInfo& g)
+{
+	// your own: covers/<system folder>/<ROM name>.png|jpg, or covers/<ROM name>.png|jpg
+	const std::string covers = OrbisDir("covers");
+	std::string own = FindWithExts(covers + "/" + Info(g.system).folder + "/" + g.file_base);
+	if (own.empty())
+		own = FindWithExts(covers + "/" + g.file_base);
+	return own;
+}
+
+std::string CoverFileFor(const GameInfo& g)
+{
+	return std::string(Info(g.system).folder) + "/" + ThumbnailName(g.nointro) + ".png";
+}
+
+std::string WantedListPath()
+{
+	return OrbisDir("covers") + "/wanted.txt";
+}
+
+std::vector<WantedCover> MissingCovers(const std::vector<GameInfo>& games)
+{
+	std::vector<WantedCover> out;
+	const std::string covers = OrbisDir("covers");
+	for (const GameInfo& g : games)
+	{
+		if (g.nointro.empty())
+			continue;
+		const std::string file = CoverFileFor(g);
+		const std::string cache = covers + "/" + file;
+		if (!Exists(RefetchMarker(cache)) &&
+			(NonEmptyFile(cache) || RecentlyMissing(cache.substr(0, cache.size() - 4) + ".missing")))
+			continue;
+		const std::string own = OwnCover(g);
+		if (!own.empty() && own != cache)
+			continue; // your own cover (a ROM named as its official name shares the downloaded cover's file)
+		const std::string dir = g.path.substr(0, g.path.find_last_of('/'));
+		if (!g.on_network && !FindWithExts(dir + "/" + g.file_base).empty())
+			continue; // a cover beside the ROM (not looked for on a share: see Load)
+		bool dup = false;
+		for (const WantedCover& w : out)
+			dup = dup || w.file == file;
+		if (!dup)
+			out.push_back({file, CoverUrlFor(g)});
+	}
+	return out;
+}
+
+void WriteWantedList(const std::vector<WantedCover>& wanted)
+{
+	std::string text;
+	for (const WantedCover& w : wanted)
+		text += w.file + "\t" + w.url + "\n";
+	WriteFileAtomic(WantedListPath(), std::vector<uint8_t>(text.begin(), text.end()));
+	OrbisLog("[covers] wanted list: %zu cover(s) for the next prefetch", wanted.size());
+}
+
+std::string CoverService::CachePath(int i) const
+{
+	const GameInfo& g = m_games[size_t(i)];
+	if (g.nointro.empty())
+		return "";
+	return OrbisDir("covers") + "/" + CoverFileFor(g);
+}
+
+bool CoverService::NeedsDownload(int i) const
+{
+	const GameInfo& g = m_games[size_t(i)];
+	const std::string cache = CachePath(i);
+	if (cache.empty())
+		return false;
+	const std::string own = OwnCover(g);
+	if (!own.empty() && own != cache)
+		return false; // your own cover, named after the ROM (not the downloaded one, when the names are the same)
+	const std::string dir = g.path.substr(0, g.path.find_last_of('/'));
+	if (!g.on_network && !FindWithExts(dir + "/" + g.file_base).empty())
+		return false; // a picture beside the ROM is used before a download (not looked for on a share: see Load)
+	if (Exists(RefetchMarker(cache)))
+		return true; // asked for again (Square)
+	return !NonEmptyFile(cache) && !RecentlyMissing(cache.substr(0, cache.size() - 4) + ".missing");
+}
+
+void CoverService::Start(const std::vector<GameInfo>& games, bool allow_download, bool background)
+{
+	Stop();
+	m_games = games;
+	m_allow_download = allow_download;
+	m_background = background && !allow_download;
+	m_placeholder.assign(games.size(), 0);
+	m_refetching.clear();
+	m_prio_focus = -1;
+	m_last_prio.clear();
+	m_bg_left = 0;
+	m_bg_offline = false;
+	m_quit = false;
+	m_state.assign(games.size(), 0);
+	m_fetched.assign(games.size(), 0);
+	m_ready.clear();
+	m_downloaded = 0;
+	int need = 0;
+	if (allow_download)
+		for (size_t i = 0; i < games.size(); i++)
+			need += NeedsDownload(int(i)) ? 1 : 0;
+	m_to_download = need;
+	OrbisLog("[covers] %zu game(s), %d cover(s) to download%s", games.size(), need,
+		allow_download ? "" : m_background ? " (the helper downloads them in the background)" : " (downloads off)");
+	m_thread = ps5::BigThread([this] { Run(); }, 8 * 1024 * 1024);
+}
+
+void CoverService::Stop()
+{
+	if (!m_thread.joinable())
+		return;
+	m_quit = true;
+	m_http.Abort();
+	m_wake.notify_all();
+	m_thread.join();
+	m_http.Term();
+}
+
+void CoverService::Collect(std::vector<CoverPtr>& slots, int keep_radius)
+{
+	if (slots.size() != m_games.size())
+		slots.assign(m_games.size(), nullptr);
+	std::lock_guard<std::mutex> lock(m_lock);
+	while (!m_ready.empty())
+	{
+		auto& r = m_ready.front();
+		if (r.first >= 0 && size_t(r.first) < slots.size())
+			slots[size_t(r.first)] = r.second;
+		m_ready.pop_front();
+	}
+	const int focus = m_focus;
+	for (size_t i = 0; i < slots.size(); i++)
+		if (slots[i] && std::abs(int(i) - focus) > keep_radius)
+		{
+			slots[i] = nullptr;
+			if (m_state[i] == 2)
+				m_state[i] = 0;
+		}
+}
+
+void CoverService::Refetch(int i)
+{
+	if (i < 0 || size_t(i) >= m_games.size())
+		return;
+	const std::string cache = CachePath(i);
+	if (cache.empty())
+		return;
+	// the cover stays: the marker asks for it again (here, or through the prefetch at the next start)
+	if (FILE* f = fopen(RefetchMarker(cache).c_str(), "w"))
+		fclose(f);
+	unlink((cache.substr(0, cache.size() - 4) + ".missing").c_str());
+	if (NeedsDownload(i))
+		m_to_download++;
+	struct stat st = {};
+	const long long mtime = stat(cache.c_str(), &st) == 0 ? (long long)st.st_mtime : -1;
+	std::lock_guard<std::mutex> lock(m_lock);
+	m_fetched[size_t(i)] = 0;
+	if (m_state[size_t(i)] == 2)
+		m_state[size_t(i)] = 0;
+	if (m_background)
+		m_refetching[i] = mtime; // the helper's new file replaces the card when it lands (PollBackground)
+	m_wake.notify_one();
+}
+
+bool CoverService::Download(int i)
+{
+	const GameInfo& g = m_games[size_t(i)];
+	const std::string cache = CachePath(i);
+	if (cache.empty())
+		return false;
+	const std::string marker = cache.substr(0, cache.size() - 4) + ".missing";
+	if (m_offline || RecentlyMissing(marker))
+		return false;
+	const std::string url = CoverUrlFor(g);
+	std::vector<uint8_t> data;
+	STELLAPS5_STAGE(Cover, "http get cover");
+	const int status = FetchCoverUrl(m_http, url, ThumbnailName(g.nointro), data);
+	if (status == 200)
+	{
+		OrbisMkdirs(cache.substr(0, cache.find_last_of('/')));
+		if (WriteFileAtomic(cache, data))
+		{
+			unlink(RefetchMarker(cache).c_str()); // the new cover is in place
+			m_downloaded++;
+			return true;
+		}
+		OrbisLog("[covers] can't write %s", cache.c_str());
+		return false;
+	}
+	if (status == 404)
+	{
+		unlink(RefetchMarker(cache).c_str()); // the server has none: the cover there (if any) stays
+		FILE* f = fopen(marker.c_str(), "w");
+		if (f)
+		{
+			fprintf(f, "%s\n", url.c_str());
+			fclose(f);
+		}
+	}
+	if (status == -1 && m_http.Offline())
+		m_offline = true;
+	return false;
+}
+
+CoverPtr CoverService::Load(int i, bool* downloaded)
+{
+	const GameInfo& g = m_games[size_t(i)];
+	*downloaded = false;
+	struct Cand
+	{
+		std::string path;
+		const char* source;
+	};
+	std::vector<Cand> cands;
+	const std::string manual = OwnCover(g);
+	if (!manual.empty())
+		cands.push_back({manual, "manual"});
+	const std::string dir = g.path.substr(0, g.path.find_last_of('/'));
+	// not beside a game on a share: this thread would make network calls while Settings may reload the shares (netfs
+	// reloads only when no other call is running); the covers of network games are kept on the console
+	const std::string beside = g.on_network ? std::string() : FindWithExts(dir + "/" + g.file_base);
+	if (!beside.empty())
+		cands.push_back({beside, "beside"});
+	const std::string cache = CachePath(i);
+	if (!cache.empty() && NonEmptyFile(cache))
+		cands.push_back({cache, "cache"});
+	bool try_download = false;
+	if ((cands.empty() || (NonEmptyFile(cache) && NeedsDownload(i))) && m_allow_download)
+	{
+		std::lock_guard<std::mutex> lock(m_lock); // Refetch (the shelf's thread) writes m_fetched too
+		try_download = !m_fetched[size_t(i)];
+		m_fetched[size_t(i)] = 1;
+	}
+	if (try_download)
+	{
+		const bool counted = NeedsDownload(i);
+		if (Download(i))
+		{
+			cands.insert(cands.begin(), {cache, "download"});
+			*downloaded = true;
+		}
+		if (counted)
+			DecrementToZero(m_to_download);
+	}
+	for (const Cand& c : cands)
+	{
+		std::vector<uint8_t> file;
+		if (!ReadFile(c.path, file))
+			continue;
+		STELLAPS5_STAGE(Cover, "decode image");
+		auto tex = Decode(file);
+		if (tex)
+		{
+			tex->real = true;
+			tex->source = c.source;
+			return tex;
+		}
+		OrbisLog("[covers] can't decode %s", c.path.c_str());
+	}
+	return Placeholder(g);
+}
+
+void CoverService::Run()
+{
+	auto last_poll = std::chrono::steady_clock::now() - std::chrono::seconds(1);
+	std::unique_lock<std::mutex> lock(m_lock);
+	while (!m_quit)
+	{
+		const int focus = m_focus;
+		int best = -1;
+		for (int i = std::max(0, focus - kLoadRadius); i <= std::min(int(m_games.size()) - 1, focus + kLoadRadius); i++)
+			if (m_state[size_t(i)] == 0 && (best < 0 || std::abs(i - focus) < std::abs(best - focus)))
+				best = i;
+		if (best >= 0)
+		{
+			m_state[size_t(best)] = 1;
+			lock.unlock();
+			static char st[48]; // one cover worker: a lasting buffer the crash handler can read
+			snprintf(st, sizeof(st), "load cover %d/%zu", best, m_games.size());
+			STELLAPS5_STAGE(Cover, st);
+			bool dl = false;
+			CoverPtr tex = Load(best, &dl);
+			STELLAPS5_STAGE(Cover, "idle");
+			lock.lock();
+			if (m_state[size_t(best)] == 1)
+			{
+				m_ready.emplace_back(best, tex);
+				m_state[size_t(best)] = 2;
+				m_placeholder[size_t(best)] = tex && !tex->real ? 1 : 0;
+			}
+			continue;
+		}
+		// Everything near the selection is loaded: fetch the rest of the library to disk, nearest first.
+		int fetch = -1;
+		if (m_allow_download && !m_offline)
+			for (size_t d = 0; d < m_games.size() && fetch < 0; d++)
+				for (int sgn = -1; sgn <= 1 && fetch < 0; sgn += 2)
+				{
+					const long i = long(focus) + sgn * long(d);
+					if (i < 0 || size_t(i) >= m_games.size() || m_fetched[size_t(i)])
+						continue;
+					m_fetched[size_t(i)] = 1;
+					fetch = int(i);
+				}
+		if (fetch >= 0)
+		{
+			// the disk is looked at with the lock released (the shelf's thread takes it every frame)
+			lock.unlock();
+			if (NeedsDownload(fetch))
+			{
+				Download(fetch);
+				DecrementToZero(m_to_download);
+			}
+			lock.lock();
+			continue;
+		}
+		if (m_background)
+		{
+			const auto now = std::chrono::steady_clock::now();
+			if (now - last_poll >= std::chrono::milliseconds(1000))
+			{
+				last_poll = now;
+				lock.unlock();
+				PollBackground(focus);
+				lock.lock();
+				continue;
+			}
+		}
+		m_wake.wait_for(lock, std::chrono::milliseconds(250));
+	}
+}
+
+void CoverService::PollBackground(int focus)
+{
+	const int lo = std::max(0, focus - kLoadRadius), hi = std::min(int(m_games.size()) - 1, focus + kLoadRadius);
+	// 1. covers the helper saved since: their placeholder cards are loaded again
+	std::vector<int> cards;
+	std::map<int, long long> refetching;
+	{
+		std::lock_guard<std::mutex> lock(m_lock);
+		for (int i = lo; i <= hi; i++)
+			if (m_state[size_t(i)] == 2 && m_placeholder[size_t(i)])
+				cards.push_back(i);
+		refetching = m_refetching;
+	}
+	std::vector<int> landed;
+	for (int i : cards)
+	{
+		const std::string cache = CachePath(i);
+		if (!cache.empty() && NonEmptyFile(cache))
+			landed.push_back(i);
+	}
+	for (const auto& r : refetching)
+	{
+		// Square: a new file (another mtime) once the helper has it
+		struct stat st = {};
+		const std::string cache = CachePath(r.first);
+		if (!cache.empty() && stat(cache.c_str(), &st) == 0 && st.st_size > 0 && (long long)st.st_mtime != r.second &&
+			!Exists(RefetchMarker(cache)))
+			landed.push_back(r.first);
+	}
+	if (!landed.empty())
+	{
+		std::lock_guard<std::mutex> lock(m_lock);
+		for (int i : landed)
+		{
+			m_refetching.erase(i);
+			if (m_state[size_t(i)] == 2)
+			{
+				m_state[size_t(i)] = 0;
+				m_placeholder[size_t(i)] = 0;
+			}
+		}
+	}
+	// 2. the covers around the selection go first: covers/priority.txt, nearest first
+	if (focus != m_prio_focus)
+	{
+		m_prio_focus = focus;
+		std::string text;
+		for (int d = 0; d <= kLoadRadius; d++)
+			for (int sgn = -1; sgn <= 1; sgn += 2)
+			{
+				const int i = focus + sgn * d;
+				if ((d == 0 && sgn > 0) || i < lo || i > hi || !NeedsDownload(i))
+					continue;
+				text += CoverFileFor(m_games[size_t(i)]) + "\t" + CoverUrlFor(m_games[size_t(i)]) + "\n";
+			}
+		if (text != m_last_prio)
+		{
+			m_last_prio = text;
+			WriteFileAtomic(PriorityListPath(), std::vector<uint8_t>(text.begin(), text.end()));
+		}
+	}
+	// 3. how far the helper got
+	const CoverProgress p = ReadCoverProgress();
+	m_bg_left = p.valid ? p.left : 0;
+	m_bg_offline = p.valid && p.state == "offline";
+}
+} // namespace fe

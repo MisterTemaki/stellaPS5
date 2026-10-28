@@ -1,0 +1,209 @@
+/*
+ * Gearlynx - Lynx Emulator
+ * Copyright (C) 2025  Ignacio Sanchez
+
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * any later version.
+
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see http://www.gnu.org/licenses/
+ *
+ */
+
+#ifndef MEMORY_INLINE_H
+#define	MEMORY_INLINE_H
+
+#include <assert.h>
+#include "memory.h"
+#include "m6502.h"
+#include "bus.h"
+
+INLINE u8* Memory::GetRAM()
+{
+    return m_state.ram;
+}
+
+INLINE void Memory::ApplyCheats()
+{
+    for (int i = 0; i < m_cheat_count; i++)
+    {
+        GLYNX_Cheat* cheat = &m_cheats[i];
+
+        if ((cheat->compare >= 0) && (m_state.ram[cheat->address] != cheat->compare))
+            continue;
+
+        m_state.ram[cheat->address] = cheat->value;
+    }
+}
+
+template<bool debug>
+INLINE u8 Memory::Read(u16 address)
+{
+#if defined(GLYNX_TESTING)
+    return m_state.ram[address];
+#endif
+
+    if (!debug)
+    {
+#if !defined(GLYNX_DISABLE_DISASSEMBLER)
+        if (m_m6502->HasMemoryHooks(true))
+            m_m6502->CheckCpuAddressHooks(address, true);
+#endif
+    }
+
+    if (likely(address < 0xFC00))
+        return m_state.ram[address];
+
+    if (unlikely(address == 0xFFF9))
+    {
+        if (likely(m_is_lynx2))
+            return (m_state.MAPCTL | 0x70) ^ 0x80;
+        else
+            return m_state.MAPCTL;
+    }
+
+    u8 page = hi(address) - 0xFC;
+
+    if (IsValidPointer(m_read_page[page]))
+        return m_read_page[page][lo(address)];
+    else if (debug)
+        return (this->*m_read_fn_debug[page])(address);
+    else
+        return (this->*m_read_fn[page])(address);
+}
+
+template<bool debug>
+INLINE void Memory::Write(u16 address, u8 value)
+{
+#if defined(GLYNX_TESTING)
+    m_state.ram[address] = value;
+    return;
+#endif
+
+    if (!debug)
+    {
+#if !defined(GLYNX_DISABLE_DISASSEMBLER)
+        if (m_m6502->HasMemoryHooks(false))
+            m_m6502->CheckCpuAddressHooks(address, false);
+#endif
+    }
+
+    if (likely(address < 0xFC00))
+    {
+        m_state.ram[address] = value;
+        return;
+    }
+
+    if (unlikely(address == 0xFFF9))
+    {
+        SetMapCtl(value);
+        return;
+    }
+
+    u8 page = hi(address) - 0xFC;
+
+    if (IsValidPointer(m_write_page[page]))
+        m_write_page[page][lo(address)] = value;
+    else if (debug)
+        (this->*m_write_fn_debug[page])(address, value);
+    else
+        (this->*m_write_fn[page])(address, value);
+}
+
+INLINE Memory::Memory_State* Memory::GetState()
+{
+    return &m_state;
+}
+
+inline void Memory::SetMapCtl(u8 MAPCTL)
+{
+    if (m_state.MAPCTL != MAPCTL)
+    {
+        m_state.MAPCTL = MAPCTL;
+        m_m6502->SetPageModeEnabled(IS_NOT_SET_BIT(MAPCTL, 7));
+        RebuildMemoryMap();
+    }
+}
+
+inline void Memory::RebuildMemoryMap()
+{
+    //Debug("Rebuilding memory map with MAPCTL: %02X", m_state.MAPCTL);
+
+    // SUZY not visible
+    if (IS_SET_BIT(m_state.MAPCTL, 0))
+    {
+        //Debug("SUZY not visible");
+        m_read_page[0] = m_state.ram + 0xFC00;
+        m_write_page[0] = m_state.ram + 0xFC00;
+        m_read_fn[0] = NULL;
+        m_write_fn[0] = NULL;
+        m_read_fn_debug[0] = NULL;
+        m_write_fn_debug[0] = NULL;
+    }
+    // SUZY visible
+    else
+    {
+        //Debug("SUZY visible");
+        m_read_page[0] = NULL;
+        m_write_page[0] = NULL;
+        m_read_fn[0] = &Memory::SuzyRead;
+        m_write_fn[0] = &Memory::SuzyWrite;
+        m_read_fn_debug[0] = &Memory::SuzyReadDebug;
+        m_write_fn_debug[0] = &Memory::SuzyWriteDebug;
+    }
+
+    // MIKEY not visible
+    if (IS_SET_BIT(m_state.MAPCTL, 1))
+    {
+        //Debug("MIKEY not visible");
+        m_read_page[1] = m_state.ram + 0xFD00;
+        m_write_page[1] = m_state.ram + 0xFD00;
+        m_read_fn[1] = NULL;
+        m_write_fn[1] = NULL;
+        m_read_fn_debug[1] = NULL;
+        m_write_fn_debug[1] = NULL;
+    }
+    // MIKEY visible
+    else
+    {
+        //Debug("MIKEY visible");
+        m_read_page[1] = NULL;
+        m_write_page[1] = NULL;
+        m_read_fn[1] = &Memory::MikeyRead;
+        m_write_fn[1] = &Memory::MikeyWrite;
+        m_read_fn_debug[1] = &Memory::MikeyReadDebug;
+        m_write_fn_debug[1] = &Memory::MikeyWriteDebug;
+    }
+
+    // BIOS not visible
+    if (IS_SET_BIT(m_state.MAPCTL, 2))
+    {
+        //Debug("BIOS not visible");
+        m_read_page[2] = m_state.ram + 0xFE00;
+        m_write_page[2] = m_state.ram + 0xFE00;
+        m_read_fn[2] = NULL;
+        m_write_fn[2] = NULL;
+        m_read_fn_debug[2] = NULL;
+        m_write_fn_debug[2] = NULL;
+    }
+    // BIOS visible
+    else
+    {
+        //Debug("BIOS visible");
+        m_read_page[2] = NULL;
+        m_write_page[2] = m_state.ram + 0xFE00;
+        m_read_fn[2] = &Memory::BiosRead;
+        m_write_fn[2] = NULL;
+        m_read_fn_debug[2] = &Memory::BiosRead;
+        m_write_fn_debug[2] = NULL;
+    }
+}
+
+#endif /* MEMORY_INLINE_H */

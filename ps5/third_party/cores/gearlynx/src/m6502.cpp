@@ -1,0 +1,518 @@
+/*
+ * Gearlynx - Lynx Emulator
+ * Copyright (C) 2025  Ignacio Sanchez
+
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * any later version.
+
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see http://www.gnu.org/licenses/
+ *
+ */
+
+#include <string>
+#include <stdexcept>
+#include <stdlib.h>
+#include <string.h>
+#include <assert.h>
+#include "m6502.h"
+#include "m6502_timing.h"
+#include "bus.h"
+#include "memory.h"
+#include "random.h"
+#include "state_serializer.h"
+#include "trace_logger.h"
+
+M6502::M6502(Bus* bus, Random* random)
+{
+    m_bus = bus;
+    m_random = random;
+    InitPointer(m_memory);
+    InitPointer(m_trace_logger);
+    InitPointer(m_profiler);
+    m_opcode_cycles = k_m6502_opcode_cycles_lynx2;
+    m_opcode_sizes = k_m6502_opcode_sizes_lynx2;
+    m_s.cycles = 0;
+    m_s.irq_asserted = false;
+    m_s.irq_pending = 0;
+    m_s.debug_next_irq = 0;
+    m_s.debug_irq_mask = 0;
+    m_s.halted = false;
+    m_s.onebyte_un_nop = false;
+    m_s.page_mode_discounts = 0;
+    m_s.last_ticks = 0;
+    m_s.total_ticks = 0;
+    m_breakpoints_enabled = false;
+    m_breakpoints_irq_enabled = 0;
+    m_vblank_watch_read = false;
+    m_vblank_watch_write = false;
+    m_vblank_watch_address = 0;
+    ResetVBlankWatch();
+    RefreshMemoryHooks();
+    m_cpu_breakpoint_hit = false;
+    m_memory_breakpoint_hit = false;
+    m_debug_brk_breakpoint_hit = false;
+    m_breakpoint_hit_address_valid = false;
+    m_breakpoint_hit_address = 0xFFFF;
+    m_run_to_breakpoint_hit = false;
+    m_run_to_breakpoint_requested = false;
+    m_debug_brk_enabled = false;
+    m_debug_brk_value = 0;
+    m_debug_brk_trigger_irq = false;
+    m_skip_irq_on_step = false;
+    m_disassembler_call_stack_size = 0;
+    m_disassembler_syntax = GLYNX_Disassembler_Syntax_Gearlynx;
+    m_prev_opcode_address = 0xFFFF;
+    m_stream_open = false;
+    m_page_mode_tick_discount = 0;
+    m_irq_sample_after_opcode = false;
+}
+
+M6502::~M6502()
+{
+}
+
+void M6502::Init(Memory* memory)
+{
+    m_memory = memory;
+    CreateZNFlagsTable();
+}
+
+void M6502::SetTraceLogger(TraceLogger* trace_logger)
+{
+    m_trace_logger = trace_logger;
+}
+
+void M6502::SetProfiler(Profiler* profiler)
+{
+    m_profiler = profiler;
+}
+
+void M6502::ProfilerEnter(u16 address, bool irq)
+{
+#if !defined(GLYNX_DISABLE_DISASSEMBLER)
+    m_profiler->Enter(address, address, 0, m_s.S.GetValue(), irq, GetInstructionTicks());
+#else
+    UNUSED(address);
+    UNUSED(irq);
+#endif
+}
+
+void M6502::LogInstructionEvent()
+{
+#if !defined(GLYNX_DISABLE_DISASSEMBLER)
+    GLYNX_Trace_Entry entry = {};
+    entry.type = TRACE_CPU;
+    entry.cpu.pc = m_s.PC.GetValue();
+    entry.cpu.a = m_s.A.GetValue();
+    entry.cpu.x = m_s.X.GetValue();
+    entry.cpu.y = m_s.Y.GetValue();
+    entry.cpu.s = m_s.S.GetValue();
+    entry.cpu.p = m_s.P.GetValue();
+    entry.cpu.mapctl = m_memory->GetState()->MAPCTL;
+    entry.cpu.opcodes[0] = m_memory->Read<true>(entry.cpu.pc);
+    entry.cpu.size = MIN(m_opcode_sizes[entry.cpu.opcodes[0]], (u8)sizeof(entry.cpu.opcodes));
+    for (u8 i = 1; i < entry.cpu.size; i++)
+        entry.cpu.opcodes[i] = m_memory->Read<true>((u16)(entry.cpu.pc + i));
+
+    GLYNX_Disassembler_Record* record = m_memory->GetDisassemblerRecord(entry.cpu.pc);
+    if (IsValidPointer(record))
+        strncpy_fit(entry.cpu.name, record->name, sizeof(entry.cpu.name));
+
+    m_trace_logger->TraceLog(entry);
+#endif
+}
+
+void M6502::LogIRQEvent(u16 pc, u16 vector)
+{
+#if !defined(GLYNX_DISABLE_DISASSEMBLER)
+    GLYNX_Trace_Entry entry = {};
+    entry.type = TRACE_CPU_IRQ;
+    entry.irq.pc = pc;
+    entry.irq.vector = vector;
+    entry.irq.irq_mask = (u8)m_s.debug_irq_mask;
+    m_trace_logger->TraceLog(entry);
+#else
+    UNUSED(pc);
+    UNUSED(vector);
+#endif
+}
+
+void M6502::Reset(bool is_lynx2)
+{
+    InitOPCodeTable(is_lynx2);
+
+    m_s.PC.SetLow(m_memory->Read(0xFFFC));
+    m_s.PC.SetHigh(m_memory->Read(0xFFFD));
+    m_s.debug_next_irq = 1;
+    DisassembleNextOPCode();
+
+    u32 rnd = m_random->Next();
+    m_s.A.SetValue((u8)rnd);
+    m_s.X.SetValue((u8)(rnd >> 8));
+    m_s.Y.SetValue((u8)(rnd >> 16));
+    m_s.S.SetValue((u8)(rnd >> 24));
+    m_s.P.SetValue(m_random->Next8Bit());
+
+    SetFlag(FLAG_UNUSED | FLAG_INTERRUPT | FLAG_BREAK);
+    ClearFlag(FLAG_DECIMAL);
+
+    m_s.cycles = 0;
+    m_s.irq_asserted = false;
+    m_s.irq_pending = 0;
+    m_s.debug_irq_mask = 0;
+    m_s.halted = false;
+    m_s.onebyte_un_nop = false;
+    m_s.page_mode_discounts = 0;
+    m_s.last_ticks = 0;
+    m_s.total_ticks = 0;
+    m_cpu_breakpoint_hit = false;
+    m_memory_breakpoint_hit = false;
+    m_debug_brk_breakpoint_hit = false;
+    m_breakpoint_hit_address_valid = false;
+    m_breakpoint_hit_address = 0xFFFF;
+    m_run_to_breakpoint_hit = false;
+    m_run_to_breakpoint_requested = false;
+    m_debug_brk_enabled = false;
+    m_debug_brk_value = 0;
+    m_debug_brk_trigger_irq = false;
+    m_prev_opcode_address = 0xFFFF;
+    m_stream_open = false;
+    m_page_mode_tick_discount = 0;
+    m_irq_sample_after_opcode = false;
+    ClearDisassemblerCallStack();
+    ResetVBlankWatch();
+}
+
+M6502::M6502_State* M6502::GetState()
+{
+    return &m_s;
+}
+
+void M6502::SetDisassemblerSyntax(GLYNX_Disassembler_Syntax syntax)
+{
+    if (syntax < GLYNX_Disassembler_Syntax_Gearlynx || syntax >= GLYNX_Disassembler_Syntax_Count)
+        syntax = GLYNX_Disassembler_Syntax_Gearlynx;
+
+    m_disassembler_syntax = syntax;
+}
+
+void M6502::EnableBreakpoints(bool enable, u8 irqs)
+{
+    m_breakpoints_enabled = enable;
+    m_breakpoints_irq_enabled = irqs;
+    RefreshMemoryHooks();
+}
+
+bool M6502::BreakpointHit()
+{
+    return (m_cpu_breakpoint_hit || m_memory_breakpoint_hit || m_debug_brk_breakpoint_hit);
+}
+
+bool M6502::GetBreakpointHitAddress(u16* address)
+{
+    if (!m_breakpoint_hit_address_valid)
+        return false;
+
+    *address = m_breakpoint_hit_address;
+    return true;
+}
+
+void M6502::ResetBreakpoints()
+{
+    m_breakpoints.clear();
+}
+
+void M6502::SetVBlankWatch(bool read, bool write, u16 address)
+{
+    if ((m_vblank_watch_read == read) && (m_vblank_watch_write == write) &&
+        (m_vblank_watch_address == address))
+        return;
+
+    m_vblank_watch_read = read;
+    m_vblank_watch_write = write;
+    m_vblank_watch_address = address;
+    ResetVBlankWatch();
+    RefreshMemoryHooks();
+}
+
+u32 M6502::UpdateVBlankWatch()
+{
+    if (!m_vblank_watch_read && !m_vblank_watch_write)
+        return 0;
+
+    bool missed = m_vblank_watch_armed && !m_vblank_watch_hit;
+    m_vblank_watch_armed = true;
+    m_vblank_watch_hit = false;
+    m_vblank_watch_misses = missed ? m_vblank_watch_misses + 1 : 0;
+
+    return m_vblank_watch_misses;
+}
+
+void M6502::RefreshMemoryHooks()
+{
+    m_memory_hooks_read = m_vblank_watch_read || m_breakpoints_enabled;
+    m_memory_hooks_write = m_vblank_watch_write || m_breakpoints_enabled;
+}
+
+void M6502::ResetVBlankWatch()
+{
+    m_vblank_watch_hit = false;
+    m_vblank_watch_armed = false;
+    m_vblank_watch_misses = 0;
+}
+
+bool M6502::AddBreakpoint(char* text, bool read, bool write, bool execute)
+{
+    int input_len = (int)strlen(text);
+    GLYNX_Breakpoint brk;
+    brk.enabled = true;
+    brk.address1 = 0;
+    brk.address2 = 0;
+    brk.range = false;
+    brk.read = read;
+    brk.write = write;
+    brk.execute = execute;
+
+    if (!read && !write && !execute)
+        return false;
+
+    if ((input_len == 9) && (text[4] == '-'))
+    {
+        // format: AAAA-BBBB
+        if (parse_hex_string(text, 4, &brk.address1) && 
+            parse_hex_string(text + 5, 4, &brk.address2))
+        {
+            brk.range = true;
+        }
+        else
+        {
+            return false;
+        }
+    }
+    else if ((input_len > 0) && (input_len <= 4))
+    {
+        // format: AAAA
+        if (!parse_hex_string(text, input_len, &brk.address1))
+        {
+            return false;
+        }
+    }
+    else
+    {
+        return false;
+    }
+
+    bool found = false;
+
+    for (long unsigned int b = 0; b < m_breakpoints.size(); b++)
+    {
+        GLYNX_Breakpoint* item = &m_breakpoints[b];
+
+        if (brk.range)
+        {
+            if (item->range && (item->address1 == brk.address1) && (item->address2 == brk.address2))
+            {
+                found = true;
+                break;
+            }
+        }
+        else
+        {
+            if (!item->range && (item->address1 == brk.address1))
+            {
+                found = true;
+                break;
+            }
+        }
+    }
+
+    if (!found)
+        m_breakpoints.push_back(brk);
+
+    return true;
+}
+
+bool M6502::AddBreakpoint(u16 address)
+{
+    char text[6];
+    snprintf(text, 6, "%04X", address);
+    return AddBreakpoint(text, false, false, true);
+}
+
+void M6502::AddRunToBreakpoint(u16 address)
+{
+    m_run_to_breakpoint.enabled = true;
+    m_run_to_breakpoint.address1 = address;
+    m_run_to_breakpoint.address2 = 0;
+    m_run_to_breakpoint.range = false;
+    m_run_to_breakpoint.read = false;
+    m_run_to_breakpoint.write = false;
+    m_run_to_breakpoint.execute = true;
+    m_run_to_breakpoint_requested = true;
+}
+
+void M6502::RemoveBreakpoint(u16 address)
+{
+    for (long unsigned int b = 0; b < m_breakpoints.size(); b++)
+    {
+        GLYNX_Breakpoint* item = &m_breakpoints[b];
+
+        if (!item->range && (item->address1 == address))
+        {
+            m_breakpoints.erase(m_breakpoints.begin() + b);
+            break;
+        }
+    }
+}
+
+bool M6502::IsBreakpoint(u16 address)
+{
+    for (long unsigned int b = 0; b < m_breakpoints.size(); b++)
+    {
+        GLYNX_Breakpoint* item = &m_breakpoints[b];
+
+        if (!item->range && (item->address1 == address))
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+void M6502::ClearDisassemblerCallStack()
+{
+    while(!m_disassembler_call_stack.empty())
+        m_disassembler_call_stack.pop();
+    m_disassembler_call_stack_size = 0;
+}
+
+void M6502::ResetDebuggerExecutionState()
+{
+    ClearDisassemblerCallStack();
+    m_run_to_breakpoint_requested = false;
+    m_run_to_breakpoint.enabled = false;
+    m_run_to_breakpoint_hit = false;
+    m_cpu_breakpoint_hit = false;
+    m_memory_breakpoint_hit = false;
+    m_debug_brk_breakpoint_hit = false;
+    m_breakpoint_hit_address_valid = false;
+    m_breakpoint_hit_address = 0xFFFF;
+    m_prev_opcode_address = 0xFFFF;
+
+    if (IsValidPointer(m_profiler))
+        m_profiler->ResetStack();
+}
+
+void M6502::CheckMemoryBreakpoints(u16 address, bool read)
+{
+#if !defined(GLYNX_DISABLE_DISASSEMBLER)
+
+    if (!m_breakpoints_enabled)
+        return;
+
+    for (int i = 0; i < (int)m_breakpoints.size(); i++)
+    {
+        GLYNX_Breakpoint* brk = &m_breakpoints[i];
+
+        if (!brk->enabled)
+            continue;
+        if (read && !brk->read)
+            continue;
+        if (!read && !brk->write)
+            continue;
+
+        if (brk->range)
+        {
+            if (address >= brk->address1 && address <= brk->address2)
+            {
+                m_memory_breakpoint_hit = true;
+                SetBreakpointHitAddress(m_prev_opcode_address);
+                m_run_to_breakpoint_requested = false;
+                return;
+            }
+        }
+        else
+        {
+            if (address == brk->address1)
+            {
+                m_memory_breakpoint_hit = true;
+                SetBreakpointHitAddress(m_prev_opcode_address);
+                m_run_to_breakpoint_requested = false;
+                return;
+            }
+        }
+    }
+#else
+    UNUSED(address);
+    UNUSED(read);
+#endif
+}
+
+void M6502::CreateZNFlagsTable()
+{
+    for (int i = 0; i < 256; i++)
+    {
+        m_zn_flags_lut[i] = 0;
+
+        if (i == 0)
+            m_zn_flags_lut[i] |= FLAG_ZERO;
+        if (i & 0x80)
+            m_zn_flags_lut[i] |= FLAG_NEGATIVE;
+    }
+}
+
+void M6502::SaveState(std::ostream& stream)
+{
+    m_s.PC.SaveState(stream);
+    m_s.A.SaveState(stream);
+    m_s.X.SaveState(stream);
+    m_s.Y.SaveState(stream);
+    m_s.S.SaveState(stream);
+    m_s.P.SaveState(stream);
+
+    StateSerializer serializer(stream);
+    Serialize(serializer, GLYNX_SAVESTATE_VERSION);
+}
+
+void M6502::LoadState(std::istream& stream, int version)
+{
+    m_s.PC.LoadState(stream);
+    m_s.A.LoadState(stream);
+    m_s.X.LoadState(stream);
+    m_s.Y.LoadState(stream);
+    m_s.S.LoadState(stream);
+    m_s.P.LoadState(stream);
+
+    StateSerializer serializer(stream);
+    Serialize(serializer, version);
+
+    ResetVBlankWatch();
+}
+
+void M6502::Serialize(StateSerializer& s, int version)
+{
+    G_SERIALIZE(s, m_s.cycles);
+    if (version < 29)
+    {
+        u32 legacy_memory_accesses = 0;
+        G_SERIALIZE(s, legacy_memory_accesses);
+    }
+    G_SERIALIZE(s, m_s.irq_asserted);
+    G_SERIALIZE(s, m_s.irq_pending);
+    G_SERIALIZE(s, m_s.debug_next_irq);
+    G_SERIALIZE(s, m_s.debug_irq_mask);
+    G_SERIALIZE(s, m_s.halted);
+    G_SERIALIZE(s, m_s.onebyte_un_nop);
+    G_SERIALIZE(s, m_s.page_mode_discounts);
+    G_SERIALIZE(s, m_stream_open);
+    G_SERIALIZE(s, m_page_mode_tick_discount);
+}

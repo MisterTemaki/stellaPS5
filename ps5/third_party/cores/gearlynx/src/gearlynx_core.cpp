@@ -1,0 +1,1311 @@
+/*
+ * Gearlynx - Lynx Emulator
+ * Copyright (C) 2025  Ignacio Sanchez
+
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * any later version.
+
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see http://www.gnu.org/licenses/
+ *
+ */
+
+#include <stdlib.h>
+#include <time.h>
+#include <string.h>
+#include <iostream>
+#include <fstream>
+#include <sstream>
+#include "gearlynx_core.h"
+#include "common.h"
+#include "media.h"
+#include "memory.h"
+#include "audio.h"
+#include "bus.h"
+#include "input.h"
+#include "m6502.h"
+#include "suzy.h"
+#include "mikey.h"
+#include "random.h"
+#include "trace_logger.h"
+#include "profiler.h"
+#include "memory_stream.h"
+
+GearlynxCore::GearlynxCore()
+{
+    InitPointer(m_memory);
+    InitPointer(m_audio);
+    InitPointer(m_bus);
+    InitPointer(m_input);
+    InitPointer(m_media);
+    InitPointer(m_m6502);
+    InitPointer(m_suzy);
+    InitPointer(m_mikey);
+    InitPointer(m_random);
+    InitPointer(m_trace_logger);
+    InitPointer(m_profiler);
+    m_paused = true;
+    m_total_cycles = 0;
+    m_comlynx_sync_callback = NULL;
+    m_comlynx_sync_user_data = NULL;
+    m_comlynx_next_sync_cycle = 0;
+    m_comlynx_sync_cycles = COMLYNX_MAX_SYNC_CYCLES;
+}
+
+GearlynxCore::~GearlynxCore()
+{
+    SafeDelete(m_m6502);
+    SafeDelete(m_media);
+    SafeDelete(m_input);
+    SafeDelete(m_bus);
+    SafeDelete(m_audio);
+    SafeDelete(m_memory);
+    SafeDelete(m_suzy);
+    SafeDelete(m_mikey);
+    SafeDelete(m_random);
+    SafeDelete(m_trace_logger);
+    SafeDelete(m_profiler);
+}
+
+void GearlynxCore::Init(GLYNX_Pixel_Format pixel_format)
+{
+    Log("Loading %s core %s by Ignacio Sanchez", GLYNX_TITLE, GLYNX_VERSION);
+
+    m_media = new Media();
+    m_bus = new Bus();
+    m_random = new Random();
+    m_random->Seed((u32)time(NULL));
+    m_m6502 = new M6502(m_bus, m_random);
+    m_input = new Input(m_media);
+    m_suzy = new Suzy(m_media, m_m6502, m_input, m_bus);
+    m_mikey = new Mikey(m_suzy, m_input, m_media, m_m6502, m_bus, m_random);
+    m_memory = new Memory(m_media, m_input, m_suzy, m_mikey, m_m6502, m_bus, m_random);
+    m_audio = new Audio(m_mikey);
+
+    m_media->Init();
+    m_memory->Init();
+    m_audio->Init();
+    m_bus->Init();
+    m_input->Init(m_suzy);
+    m_suzy->Init(m_memory, m_mikey);
+    m_mikey->Init(m_memory, pixel_format);
+    m_mikey->SetAudio(m_audio);
+    m_m6502->Init(m_memory);
+
+#if !defined(GLYNX_DISABLE_DISASSEMBLER)
+    m_trace_logger = new TraceLogger(&m_total_cycles);
+    m_m6502->SetTraceLogger(m_trace_logger);
+    m_suzy->SetTraceLogger(m_trace_logger);
+    m_mikey->SetTraceLogger(m_trace_logger);
+    m_media->SetTraceLogger(m_trace_logger);
+    m_profiler = new Profiler(&m_total_cycles);
+    m_m6502->SetProfiler(m_profiler);
+    m_mikey->SetProfiler(m_profiler);
+#endif
+
+}
+
+void GearlynxCore::SetRandomSeed(u32 seed)
+{
+    m_random->Seed(seed);
+}
+
+template<bool debugger>
+bool GearlynxCore::RunToVBlankTemplate(u8* frame_buffer, s16* sample_buffer,
+    int* sample_count, GLYNX_Debug_Run* debug, bool render)
+{
+    m_mikey->GetLcdScreen()->SetBuffer(frame_buffer);
+    m_input->BeginFrame();
+#if !defined(GLYNX_DISABLE_DISASSEMBLER)
+    m_suzy->BeginSpriteBoundingBoxFrame();
+#endif
+
+    if (debugger)
+    {
+        bool debug_enable = false;
+
+        if (IsValidPointer(debug))
+        {
+            debug_enable = true;
+            m_m6502->EnableBreakpoints(debug->stop_on_breakpoint, debug->stop_on_irq);
+            m_m6502->SetSkipIRQOnStep(debug->skip_interrupts_on_step);
+        }
+
+        m_m6502->SetDebugBRK(debug_enable && debug->stop_on_brk,
+            debug_enable ? debug->brk_value : 0,
+            debug_enable && debug->brk_trigger_irq);
+
+        bool stop = false;
+        bool frame_ready = false;
+        u32 failsafe_cycle_count = 0;
+
+        do
+        {
+            u32 lynx_cycles;
+            stop = RunCycle(lynx_cycles);
+
+#if !defined(GLYNX_DISABLE_DISASSEMBLER)
+            if (stop)
+                m_suzy->SwapFrameSCBList();
+#endif
+
+            failsafe_cycle_count += lynx_cycles;
+            if (failsafe_cycle_count > 450000)
+            {
+                Debug("Exceeded max cycles in RunToVBlankTemplate");
+                stop = true;
+            }
+
+            if (stop)
+                frame_ready = true;
+
+            if (debug_enable)
+            {
+                if (debug->step_debugger && !m_m6502->IsHalted())
+                    stop = true;
+
+                if (m_m6502->BreakpointHit())
+                    stop = true;
+
+                if (debug->stop_on_run_to_breakpoint && m_m6502->RunToBreakpointHit())
+                    stop = true;
+            }
+        }
+        while (!stop);
+
+        if (frame_ready)
+            m_memory->ApplyCheats();
+
+#if !defined(GLYNX_DISABLE_DISASSEMBLER)
+        m_suzy->EndSpriteBoundingBoxFrame();
+#endif
+        if (render)
+            m_mikey->GetLcdScreen()->EndFrame(m_media->GetRotation());
+        EndFrame(sample_buffer, sample_count);
+
+        return m_m6502->BreakpointHit() || m_m6502->RunToBreakpointHit();
+    }
+    else
+    {
+        UNUSED(debug);
+
+        bool stop = false;
+        u32 failsafe_cycle_count = 0;
+
+        do
+        {
+            u32 lynx_cycles;
+            stop = RunCycle(lynx_cycles);
+
+            failsafe_cycle_count += lynx_cycles;
+            if (failsafe_cycle_count > 450000)
+            {
+                Debug("Exceeded max cycles in RunToVBlankTemplate");
+                stop = true;
+            }
+        }
+        while (!stop);
+
+        m_memory->ApplyCheats();
+
+#if !defined(GLYNX_DISABLE_DISASSEMBLER)
+        m_suzy->EndSpriteBoundingBoxFrame();
+#endif
+        if (render)
+            m_mikey->GetLcdScreen()->EndFrame(m_media->GetRotation());
+        EndFrame(sample_buffer, sample_count);
+
+        return false;
+    }
+}
+
+bool GearlynxCore::RunToVBlank(u8* frame_buffer, s16* sample_buffer,
+    int* sample_count, GLYNX_Debug_Run* debug, bool render)
+{
+    if (!m_media->IsBiosLoaded())
+    {
+        if (render)
+            m_mikey->GetLcdScreen()->RenderNoBiosScreen(frame_buffer);
+        return false;
+    }
+
+    if (!m_mikey->IsPoweredOn())
+    {
+        if (render)
+            m_mikey->GetLcdScreen()->RenderNoPowerScreen(frame_buffer);
+        return false;
+    }
+
+    if (m_paused || !m_media->IsReady())
+        return false;
+
+#if defined(GLYNX_DISABLE_DISASSEMBLER)
+    const bool debugger = false;
+#else
+    const bool debugger = true;
+#endif
+
+    if (debugger)
+        return RunToVBlankTemplate<true>(frame_buffer, sample_buffer, sample_count, debug, render);
+    else
+        return RunToVBlankTemplate<false>(frame_buffer, sample_buffer, sample_count, debug, render);
+}
+
+void GearlynxCore::EndFrame(s16* sample_buffer, int* sample_count)
+{
+    m_audio->EndFrame(sample_buffer, sample_count);
+    m_input->ApplyPendingState();
+}
+
+void GearlynxCore::RenderFrameBuffer(u8* frame_buffer)
+{
+    m_mikey->GetLcdScreen()->SetBuffer(frame_buffer);
+    m_mikey->GetLcdScreen()->EndFrame(m_media->GetRotation());
+}
+
+bool GearlynxCore::LoadROM(const char* file_path, bool softpatching)
+{
+    ClearCheats();
+
+    if (m_media->LoadFromFile(file_path, softpatching))
+    {
+        m_memory->ResetDisassemblerRecords();
+        Reset();
+        return true;
+    }
+    else
+        return false;
+}
+
+bool GearlynxCore::LoadROMFromBuffer(const u8* buffer, int size, const char* file_path)
+{
+    ClearCheats();
+
+    if (m_media->LoadFromBuffer(buffer, size, file_path))
+    {
+        m_memory->ResetDisassemblerRecords();
+        Reset();
+        return true;
+    }
+    else
+        return false;
+}
+
+GLYNX_Bios_State GearlynxCore::LoadBios(const char* file_path)
+{
+    return m_media->LoadBios(file_path);
+}
+
+GLYNX_Bios_State GearlynxCore::LoadBiosFromBuffer(const u8* buffer, int size)
+{
+    return m_media->LoadBiosFromBuffer(buffer, size);
+}
+
+void GearlynxCore::UnloadBios()
+{
+    m_media->UnloadBios();
+}
+
+bool GearlynxCore::GetRuntimeInfo(GLYNX_Runtime_Info& runtime_info)
+{
+    GLYNX_Rotation rotation = m_media->GetRotation();
+
+    if (rotation == GLYNX_ROTATION_LEFT || rotation == GLYNX_ROTATION_RIGHT)
+    {
+        runtime_info.screen_width = GLYNX_SCREEN_HEIGHT;
+        runtime_info.screen_height = GLYNX_SCREEN_WIDTH;
+    }
+    else
+    {
+        runtime_info.screen_width = GLYNX_SCREEN_WIDTH;
+        runtime_info.screen_height = GLYNX_SCREEN_HEIGHT;
+    }
+
+    Mikey::Mikey_State* mikey_state = m_mikey->GetState();
+    float t0_backup = (float)mikey_state->timers[0].backup;
+    float t2_backup = (float)mikey_state->timers[2].backup;
+
+    u8 t0_prescaler = mikey_state->timers[0].control_a & 0x07;
+    float tick_T0_us = (float)k_mikey_timer_period_us[t0_prescaler];
+
+    if (mikey_state->timers[0].backup == 0 && mikey_state->timers[2].backup == 0)
+        runtime_info.frame_time = 0.0f;
+    else
+        runtime_info.frame_time = ((t0_backup + 1.0f) * tick_T0_us * (t2_backup + 1.0f)) / 1000.0f;
+
+    return m_media->IsReady();
+}
+
+bool GearlynxCore::SetCheat(const char* cheat)
+{
+    if (!m_media->IsReady())
+        return false;
+
+    GLYNX_Cheat cheats[GLYNX_MAX_CHEATS];
+    int count = ParseCheat(cheat, cheats, GLYNX_MAX_CHEATS);
+
+    if ((count <= 0) || !m_memory->CanAddCheats(count))
+        return false;
+
+    for (int i = 0; i < count; i++)
+        m_memory->AddCheat(cheats[i]);
+
+    return true;
+}
+
+void GearlynxCore::ClearCheats()
+{
+    m_memory->ClearCheats();
+}
+
+bool GearlynxCore::IsValidCheat(const char* cheat)
+{
+    GLYNX_Cheat cheats[GLYNX_MAX_CHEATS];
+    return ParseCheat(cheat, cheats, GLYNX_MAX_CHEATS) > 0;
+}
+
+int GearlynxCore::ParseCheat(const char* cheat, GLYNX_Cheat* cheats, int max_cheats)
+{
+    if (!IsValidPointer(cheat))
+        return 0;
+
+    int count = 0;
+    const char* p = cheat;
+
+    while (*p != 0)
+    {
+        while (IsCheatSeparator(*p))
+            p++;
+
+        if (*p == 0)
+            break;
+
+        const char* code = p;
+
+        while ((*p != 0) && !IsCheatSeparator(*p))
+            p++;
+
+        int parsed = ParseCheatCode(code, (int)(p - code), cheats + count, max_cheats - count);
+
+        if (parsed <= 0)
+            return 0;
+
+        count += parsed;
+    }
+
+    return count;
+}
+
+int GearlynxCore::ParseCheatCode(const char* code, int length, GLYNX_Cheat* cheats, int max_cheats)
+{
+    u16 address = 0;
+    u8 compare = 0;
+    bool has_compare = false;
+    int pos = 4;
+
+    if ((length < 6) || !parse_hex_string(code, 4, &address))
+        return 0;
+
+    if (code[pos] == '?')
+    {
+        if ((length < 9) || !parse_hex_string(code + 5, 2, &compare))
+            return 0;
+
+        has_compare = true;
+        pos = 7;
+    }
+
+    if (code[pos] != ':')
+        return 0;
+
+    pos++;
+
+    const char* value_str = code + pos;
+    int digits = length - pos;
+    u16 value = 0;
+
+    if (digits == 3)
+    {
+        for (int i = 0; i < 3; i++)
+        {
+            if ((value_str[i] < '0') || (value_str[i] > '9'))
+                return 0;
+
+            value = (value * 10) + (value_str[i] - '0');
+        }
+
+        if (value > 0xFF)
+            return 0;
+    }
+    else if (((digits < 1) || (digits > 4)) || !parse_hex_string(value_str, digits, &value))
+        return 0;
+
+    if (digits == 4)
+    {
+        if (has_compare || (max_cheats < 2))
+            return 0;
+
+        cheats[0].address = address;
+        cheats[0].compare = -1;
+        cheats[0].value = value & 0xFF;
+        cheats[1].address = (address + 1) & 0xFFFF;
+        cheats[1].compare = -1;
+        cheats[1].value = value >> 8;
+        return 2;
+    }
+
+    if (max_cheats < 1)
+        return 0;
+
+    cheats[0].address = address;
+    cheats[0].compare = has_compare ? compare : -1;
+    cheats[0].value = value & 0xFF;
+    return 1;
+}
+
+bool GearlynxCore::IsCheatSeparator(char c)
+{
+    return (c == '+') || (c == ',') || (c == ';') || (c == ' ') || (c == '\t') || (c == '\r') || (c == '\n');
+}
+
+u64 GearlynxCore::GetTotalCycles()
+{
+    return m_total_cycles;
+}
+
+TraceLogger* GearlynxCore::GetTraceLogger()
+{
+    return m_trace_logger;
+}
+
+Profiler* GearlynxCore::GetProfiler()
+{
+    return m_profiler;
+}
+
+void GearlynxCore::SetComLynxCallbacks(GLYNX_ComLynx_Publish_Callback publish_callback,
+    GLYNX_ComLynx_Sample_Callback sample_callback, GLYNX_ComLynx_Break_Callback break_callback,
+    GLYNX_ComLynx_Sync_Callback sync_callback, void* user_data)
+{
+    m_mikey->SetComLynxCallbacks(publish_callback, sample_callback, break_callback, sync_callback, user_data);
+
+    m_comlynx_sync_callback = sync_callback;
+    m_comlynx_sync_user_data = user_data;
+
+    m_comlynx_next_sync_cycle = m_total_cycles;
+    m_comlynx_sync_cycles = m_mikey->GetComLynxSyncCycles();
+}
+
+void GearlynxCore::SetComLynxTurboCallbacks(GLYNX_ComLynx_Turbo_Sample_Callback sample_callback,
+    GLYNX_ComLynx_Turbo_Sync_Callback sync_callback, void* user_data)
+{
+    m_mikey->SetComLynxTurboCallbacks(sample_callback, sync_callback, user_data);
+}
+
+void GearlynxCore::SetComLynxCableConnected(bool connected)
+{
+    m_mikey->SetComLynxCableConnected(connected);
+}
+
+void GearlynxCore::KeyPressed(GLYNX_Keys key)
+{
+    m_input->KeyPressed(key);
+}
+
+void GearlynxCore::KeyReleased(GLYNX_Keys key)
+{
+    m_input->KeyReleased(key);
+}
+
+void GearlynxCore::Pause(bool paused)
+{
+    if (!m_paused && paused)
+    {
+        Debug("Core paused");
+    }
+    else if (m_paused && !paused)
+    {
+        Debug("Core resumed");
+    }
+
+    m_paused = paused;
+}
+
+bool GearlynxCore::IsPaused()
+{
+    return m_paused;
+}
+
+void GearlynxCore::ResetROM(bool preserve_ram)
+{
+    if (!m_media->IsReady())
+        return;
+
+    using namespace std;
+    stringstream stream;
+
+    if (preserve_ram)
+        m_media->SaveRam(stream);
+
+    Log(GLYNX_TITLE " RESET");
+    Reset();
+    m_m6502->DisassembleNextOPCode();
+
+    if (preserve_ram)
+    {
+        stream.seekg(0, stream.end);
+        s32 size = (s32)stream.tellg();
+        stream.seekg(0, stream.beg);
+        m_media->LoadRam(stream, size);
+    }
+}
+
+void GearlynxCore::SaveRam()
+{
+    SaveRam(NULL);
+}
+
+void GearlynxCore::SaveRam(const char* path, bool full_path)
+{
+    if (m_media->IsReady() && m_media->GetSaveMemorySize() > 0)
+    {
+        using namespace std;
+        string final_path;
+
+        if (IsValidPointer(path))
+        {
+            final_path = path;
+            if (!full_path)
+            {
+                append_path_component(final_path, m_media->GetFileName());
+            }
+        }
+        else
+            final_path = m_media->GetFilePath();
+
+        if (!full_path)
+        {
+            string::size_type i = final_path.rfind('.', final_path.length());
+            if (i != string::npos)
+                final_path.replace(i, final_path.length() - i, ".sav");
+        }
+
+        Log("Saving RAM file: %s", final_path.c_str());
+
+        ofstream file;
+        open_ofstream_utf8(file, final_path.c_str(), ios::out | ios::binary);
+
+        if (!file.is_open())
+        {
+            Error("Failed to open RAM file for writing: %s", final_path.c_str());
+            return;
+        }
+
+        bool ram_saved = m_media->SaveRam(file);
+        file.close();
+
+        if (!ram_saved || !file.good())
+        {
+            Error("Failed to write RAM file: %s", final_path.c_str());
+            return;
+        }
+
+        m_media->ClearSaveMemoryDirty();
+
+        Debug("RAM saved");
+    }
+}
+
+void GearlynxCore::LoadRam()
+{
+    LoadRam(NULL);
+}
+
+void GearlynxCore::LoadRam(const char* path, bool full_path)
+{
+    if (m_media->IsReady() && m_media->GetSaveMemorySize() > 0)
+    {
+        using namespace std;
+        string final_path;
+
+        if (IsValidPointer(path))
+        {
+            final_path = path;
+            if (!full_path)
+            {
+                append_path_component(final_path, m_media->GetFileName());
+            }
+        }
+        else
+            final_path = m_media->GetFilePath();
+
+        if (!full_path)
+        {
+            string::size_type i = final_path.rfind('.', final_path.length());
+            if (i != string::npos)
+                final_path.replace(i, final_path.length() - i, ".sav");
+        }
+
+        Log("Loading RAM file: %s", final_path.c_str());
+
+        ifstream file;
+        open_ifstream_utf8(file, final_path.c_str(), ios::in | ios::binary);
+
+        if (!file.fail())
+        {
+            file.seekg(0, file.end);
+            s32 file_size = (s32)file.tellg();
+            file.seekg(0, file.beg);
+
+            if (m_media->LoadRam(file, file_size))
+            {
+                Debug("RAM loaded");
+            }
+            else
+            {
+                Error("Failed to load RAM from %s", final_path.c_str());
+                Error("Invalid RAM size: %d", file_size);
+            }
+        }
+        else
+        {
+            Log("RAM file doesn't exist: %s", final_path.c_str());
+        }
+    }
+}
+
+std::string GearlynxCore::GetSaveStatePath(const char* path, int index)
+{
+    if (index < 0)
+    {
+        if (IsValidPointer(path))
+            return path;
+
+        using namespace std;
+        string full_path = m_media->GetFilePath();
+        string::size_type dot_index = full_path.rfind('.');
+
+        if (dot_index != string::npos)
+            full_path.replace(dot_index + 1, full_path.length() - dot_index - 1, "state");
+
+        return full_path;
+    }
+
+    using namespace std;
+    string full_path;
+
+    if (IsValidPointer(path))
+    {
+        full_path = path;
+        append_path_component(full_path, m_media->GetFileName());
+    }
+    else
+        full_path = m_media->GetFilePath();
+
+    string::size_type dot_index = full_path.rfind('.');
+
+    if (dot_index != string::npos)
+        full_path.replace(dot_index + 1, full_path.length() - dot_index - 1, "state");
+
+    stringstream ss;
+    ss << index;
+    full_path += ss.str();
+
+    return full_path;
+}
+
+bool GearlynxCore::SaveState(const char* path, int index, bool screenshot)
+{
+    using namespace std;
+
+    string full_path = GetSaveStatePath(path, index);
+    string temp_path = full_path + ".tmp";
+    Debug("Saving state to %s...", full_path.c_str());
+
+    ofstream stream;
+    open_ofstream_utf8(stream, temp_path.c_str(), ios::out | ios::binary);
+
+    if (!stream.is_open())
+    {
+        Error("Failed to open save state file for writing: %s", temp_path.c_str());
+        return false;
+    }
+
+    size_t size = 0;
+    if (!SaveState(stream, size, screenshot))
+    {
+        stream.close();
+        remove_file_utf8(temp_path.c_str());
+        Error("Failed to save state to file: %s", full_path.c_str());
+        return false;
+    }
+
+    stream.close();
+
+    if (!stream.good() || !rename_file_utf8(temp_path.c_str(), full_path.c_str()))
+    {
+        remove_file_utf8(temp_path.c_str());
+        Error("Failed to write save state file: %s", full_path.c_str());
+        return false;
+    }
+
+    Log("Saved state to %s", full_path.c_str());
+    return true;
+}
+
+bool GearlynxCore::SaveState(u8* buffer, size_t& size, bool screenshot)
+{
+    using namespace std;
+
+    Debug("Saving state to buffer [%d bytes]...", size);
+
+    if (!m_media->IsReady())
+    {
+        Error("Media is not ready when trying to save state");
+        return false;
+    }
+
+    if (!IsValidPointer(buffer))
+    {
+        stringstream stream;
+        if (!SaveState(stream, size, screenshot))
+        {
+            Error("Failed to save state to stream to calculate size");
+            return false;
+        }
+        return true;
+    }
+    else
+    {
+        memory_stream direct_stream(reinterpret_cast<char*>(buffer), size);
+
+        if (!SaveState(direct_stream, size, screenshot))
+        {
+            Error("Failed to save state to buffer");
+            return false;
+        }
+
+        if (!direct_stream.good())
+        {
+            Error("Failed to save state to buffer: output buffer is too small");
+            return false;
+        }
+
+        size = direct_stream.size();
+        return true;
+    }
+}
+
+bool GearlynxCore::GetMaxSaveStateSize(size_t& size)
+{
+    if (!SaveState(NULL, size))
+        return false;
+
+    size += m_media->GetSaveStateSizeReserve();
+    return true;
+}
+
+bool GearlynxCore::SaveState(std::ostream& stream, size_t& size, bool screenshot)
+{
+    using namespace std;
+
+    if (!m_media->IsReady())
+    {
+        Error("Media is not ready when trying to save state");
+        return false;
+    }
+
+    Debug("Serializing save state...");
+
+    m_m6502->SaveState(stream);
+    m_memory->SaveState(stream);
+    m_mikey->SaveState(stream);
+    m_suzy->SaveState(stream);
+    m_audio->SaveState(stream);
+    m_input->SaveState(stream);
+    m_media->SaveState(stream);
+    m_random->SaveState(stream);
+    m_bus->SaveState(stream);
+
+#if defined(__LIBRETRO__)
+    UNUSED(screenshot);
+    GLYNX_SaveState_Header_Libretro header;
+    header.magic = GLYNX_SAVESTATE_MAGIC;
+    header.version = GLYNX_SAVESTATE_VERSION;
+    Debug("Save state header magic: 0x%08x", header.magic);
+    Debug("Save state header version: %d", header.version);
+#else
+    GLYNX_SaveState_Header header;
+    header.magic = GLYNX_SAVESTATE_MAGIC;
+    header.version = GLYNX_SAVESTATE_VERSION;
+
+    header.timestamp = time(NULL);
+    strncpy_fit(header.rom_name, m_media->GetFileName(), sizeof(header.rom_name));
+    header.rom_crc = m_media->GetCRC();
+    strncpy_fit(header.emu_build, GLYNX_VERSION, sizeof(header.emu_build));
+
+    Debug("Save state header magic: 0x%08x", header.magic);
+    Debug("Save state header version: %d", header.version);
+    Debug("Save state header timestamp: %d", header.timestamp);
+    Debug("Save state header rom name: %s", header.rom_name);
+    Debug("Save state header rom crc: 0x%08x", header.rom_crc);
+    Debug("Save state header emu build: %s", header.emu_build);
+
+    if (screenshot)
+    {
+        GLYNX_Runtime_Info runtime_info;
+        u8* frame_buffer = m_mikey->GetLcdScreen()->GetBuffer();
+
+        if (!IsValidPointer(frame_buffer) || !GetRuntimeInfo(runtime_info))
+        {
+            header.screenshot_size = 0;
+            header.screenshot_width = 0;
+            header.screenshot_height = 0;
+        }
+        else
+        {
+            header.screenshot_width = runtime_info.screen_width;
+            header.screenshot_height = runtime_info.screen_height;
+
+            int bytes_per_pixel = 2;
+            if (m_mikey->GetLcdScreen()->GetPixelFormat() == GLYNX_PIXEL_RGBA8888)
+                bytes_per_pixel = 4;
+
+            header.screenshot_size = header.screenshot_width * header.screenshot_height * bytes_per_pixel;
+            stream.write(reinterpret_cast<const char*>(frame_buffer), header.screenshot_size);
+        }
+    }
+    else
+    {
+        header.screenshot_size = 0;
+        header.screenshot_width = 0;
+        header.screenshot_height = 0;
+    }
+
+    Debug("Save state header screenshot size: %d", header.screenshot_size);
+    Debug("Save state header screenshot width: %d", header.screenshot_width);
+    Debug("Save state header screenshot height: %d", header.screenshot_height);
+#endif
+
+    size = static_cast<size_t>(stream.tellp());
+    size += sizeof(header);
+
+#if !defined(__LIBRETRO__)
+    header.size = static_cast<u32>(size);
+    Debug("Save state header size: %d", header.size);
+#endif
+
+    stream.write(reinterpret_cast<const char*>(&header), sizeof(header));
+    return true;
+}
+
+bool GearlynxCore::LoadState(const char* path, int index)
+{
+    using namespace std;
+    bool ret = false;
+
+    string full_path = GetSaveStatePath(path, index);
+    Debug("Loading state from %s...", full_path.c_str());
+
+    ifstream stream;
+    open_ifstream_utf8(stream, full_path.c_str(), ios::in | ios::binary);
+
+    if (!stream.fail())
+    {
+        ret = LoadState(stream);
+
+        if (ret)
+            Log("Loaded state from %s", full_path.c_str());
+        else
+            Error("Failed to load state from %s", full_path.c_str());
+    }
+    else
+    {
+        Error("Load state file doesn't exist: %s", full_path.c_str());
+    }
+
+    stream.close();
+    return ret;
+}
+
+bool GearlynxCore::LoadState(const u8* buffer, size_t size)
+{
+    using namespace std;
+
+    Debug("Loading state to buffer [%d bytes]...", size);
+
+    if (!m_media->IsReady())
+    {
+        Error("Media is not ready when trying to load state");
+        return false;
+    }
+
+    if (!IsValidPointer(buffer) || (size == 0))
+    {
+        Error("Invalid load state buffer");
+        return false;
+    }
+
+    memory_input_stream direct_stream(reinterpret_cast<const char*>(buffer), size);
+    return LoadState(direct_stream);
+}
+
+bool GearlynxCore::LoadState(std::istream& stream)
+{
+    using namespace std;
+
+    if (!m_media->IsReady())
+    {
+        Error("Media is not ready when trying to load state");
+        return false;
+    }
+
+    GLYNX_SaveState_Header_Libretro header = {};
+#if !defined(__LIBRETRO__)
+    bool is_desktop_savestate = false;
+#endif
+
+    stream.seekg(0, ios::end);
+    std::streampos end = stream.tellg();
+    if (!stream.good() || end < (std::streamoff)sizeof(header))
+        return false;
+    size_t size = static_cast<size_t>(end);
+    size_t body_size = size - sizeof(header);
+
+    // Try desktop header first (larger, contains all info)
+    GLYNX_SaveState_Header desktop_header = {};
+    if (size >= sizeof(desktop_header))
+    {
+        stream.seekg(size - sizeof(desktop_header), ios::beg);
+        stream.read(reinterpret_cast<char*> (&desktop_header), sizeof(desktop_header));
+
+        if (stream.good() && desktop_header.magic == GLYNX_SAVESTATE_MAGIC)
+        {
+            body_size = size - sizeof(desktop_header);
+            if (desktop_header.screenshot_size > body_size)
+                return false;
+            body_size -= desktop_header.screenshot_size;
+            header.magic = desktop_header.magic;
+            header.version = desktop_header.version;
+#if !defined(__LIBRETRO__)
+            is_desktop_savestate = true;
+#endif
+            Debug("Loading desktop save state");
+        }
+    }
+
+    // Fallback to libretro header
+    if ((header.magic != GLYNX_SAVESTATE_MAGIC) && (size >= sizeof(header)))
+    {
+        stream.seekg(size - sizeof(header), ios::beg);
+        stream.read(reinterpret_cast<char*> (&header), sizeof(header));
+    }
+
+    stream.seekg(0, ios::beg);
+
+    if (!stream.good())
+        return false;
+
+    Debug("Load state header magic: 0x%08x", header.magic);
+    Debug("Load state header version: %d", header.version);
+
+    if ((header.magic != GLYNX_SAVESTATE_MAGIC))
+    {
+        Log("Invalid save state: 0x%08x", header.magic);
+        return false;
+    }
+
+    if (header.version < GLYNX_SAVESTATE_MIN_VERSION || header.version > GLYNX_SAVESTATE_VERSION)
+    {
+        Error("Invalid save state version: %d", header.version);
+        return false;
+    }
+
+#if !defined(__LIBRETRO__)
+    if (is_desktop_savestate)
+    {
+        Debug("Load state header size: %d", desktop_header.size);
+        Debug("Load state header timestamp: %d", desktop_header.timestamp);
+        Debug("Load state header rom name: %s", desktop_header.rom_name);
+        Debug("Load state header rom crc: 0x%08x", desktop_header.rom_crc);
+        Debug("Load state header screenshot size: %d", desktop_header.screenshot_size);
+        Debug("Load state header screenshot width: %d", desktop_header.screenshot_width);
+        Debug("Load state header screenshot height: %d", desktop_header.screenshot_height);
+        Debug("Load state header emu build: %s", desktop_header.emu_build);
+
+        if (desktop_header.size != size)
+        {
+            Error("Invalid save state size: %d", desktop_header.size);
+            return false;
+        }
+
+        if (desktop_header.rom_crc != m_media->GetCRC())
+        {
+            Error("Invalid save state rom crc: 0x%08x", desktop_header.rom_crc);
+            return false;
+        }
+    }
+#endif
+
+    Debug("Unserializing save state...");
+
+    m_m6502->LoadState(stream, header.version);
+    if (!stream.good())
+        return false;
+    m_memory->LoadState(stream, header.version);
+    if (!stream.good())
+        return false;
+    m_mikey->LoadState(stream, header.version);
+    if (!stream.good())
+        return false;
+    m_suzy->LoadState(stream, header.version);
+    if (!stream.good())
+        return false;
+    m_audio->LoadState(stream, header.version);
+    if (!stream.good())
+        return false;
+    m_input->LoadState(stream);
+    if (!stream.good())
+        return false;
+    m_media->LoadState(stream, header.version);
+    if (!stream.good())
+        return false;
+
+    if (header.version >= 21)
+    {
+        m_random->LoadState(stream);
+    }
+
+    if (header.version >= 27)
+        m_bus->LoadState(stream);
+    else
+        m_bus->Reset();
+
+    return stream.good() && stream.tellg() == (std::streamoff)body_size;
+}
+
+bool GearlynxCore::GetSaveStateHeader(int index, const char* path, GLYNX_SaveState_Header* header)
+{
+    using namespace std;
+
+    string full_path = GetSaveStatePath(path, index);
+    Debug("Loading state header from %s...", full_path.c_str());
+
+    ifstream stream;
+    open_ifstream_utf8(stream, full_path.c_str(), ios::in | ios::binary);
+
+    if (stream.fail())
+    {
+        Debug("ERROR: Savestate file doesn't exist %s", full_path.c_str());
+        stream.close();
+        return false;
+    }
+
+    stream.seekg(0, ios::end);
+    size_t savestate_size = static_cast<size_t>(stream.tellg());
+    stream.seekg(0, ios::beg);
+
+    if (savestate_size < sizeof(GLYNX_SaveState_Header))
+    {
+        Error("Invalid save state file size: %zu", savestate_size);
+        stream.close();
+        return false;
+    }
+
+    stream.seekg(savestate_size - sizeof(GLYNX_SaveState_Header), ios::beg);
+    stream.read(reinterpret_cast<char*> (header), sizeof(GLYNX_SaveState_Header));
+    stream.seekg(0, ios::beg);
+
+    if (stream.fail())
+    {
+        Error("Failed to read save state header from %s", full_path.c_str());
+        stream.close();
+        return false;
+    }
+
+    stream.close();
+
+    if (header->magic != GLYNX_SAVESTATE_MAGIC)
+    {
+        Error("Invalid save state magic: 0x%08x", header->magic);
+        return false;
+    }
+
+    if (header->size != savestate_size)
+    {
+        Error("Invalid save state size: %d", header->size);
+        return false;
+    }
+
+    return true;
+}
+
+bool GearlynxCore::GetSaveStateScreenshot(int index, const char* path, GLYNX_SaveState_Screenshot* screenshot)
+{
+    using namespace std;
+
+    if (!IsValidPointer(screenshot) || !IsValidPointer(screenshot->data) || (screenshot->size == 0))
+    {
+        Error("Invalid save state screenshot buffer");
+        return false;
+    }
+
+    string full_path = GetSaveStatePath(path, index);
+    Debug("Loading state screenshot from %s...", full_path.c_str());
+
+    ifstream stream;
+    open_ifstream_utf8(stream, full_path.c_str(), ios::in | ios::binary);
+
+    if (stream.fail())
+    {
+        Error("Savestate file doesn't exist %s", full_path.c_str());
+        stream.close();
+        return false;
+    }
+
+    GLYNX_SaveState_Header header;
+
+    if (!GetSaveStateHeader(index, path, &header))
+    {
+        Error("Invalid save state header");
+        stream.close();
+        return false;
+    }
+
+    if (header.screenshot_size == 0)
+    {
+        Debug("No screenshot data");
+        stream.close();
+        return false;
+    }
+
+    if (screenshot->size < header.screenshot_size)
+    {
+        Error("Invalid screenshot buffer size %d < %d", screenshot->size, header.screenshot_size);
+        stream.close();
+        return false;
+    }
+
+    if (header.size < (sizeof(header) + header.screenshot_size))
+    {
+        Error("Invalid screenshot size: %d", header.screenshot_size);
+        stream.close();
+        return false;
+    }
+
+    screenshot->size = header.screenshot_size;
+    screenshot->width = header.screenshot_width;
+    screenshot->height = header.screenshot_height;
+
+    Debug("Screenshot size: %d bytes", screenshot->size);
+    Debug("Screenshot width: %d", screenshot->width);
+    Debug("Screenshot height: %d", screenshot->height);
+
+    stream.seekg(header.size - sizeof(header) - screenshot->size, ios::beg);
+    stream.read(reinterpret_cast<char*> (screenshot->data), screenshot->size);
+    stream.close();
+
+    return true;
+}
+
+void GearlynxCore::Reset()
+{
+    m_paused = false;
+    m_total_cycles = 0;
+
+    if (IsValidPointer(m_profiler))
+        m_profiler->Reset();
+
+    m_comlynx_next_sync_cycle = 0;
+
+    m_media->Reset();
+
+    bool is_lynx2 = (m_media->GetConsoleType() == GLYNX_CONSOLE_MODEL_II);
+
+    m_suzy->Reset();
+    m_mikey->Reset(is_lynx2);
+    m_memory->Reset(is_lynx2);
+    m_m6502->Reset(is_lynx2);
+    m_audio->Reset(is_lynx2);
+    m_bus->Reset();
+    m_input->Reset();
+
+    m_comlynx_sync_cycles = m_mikey->GetComLynxSyncCycles();
+
+    if (m_media->GetType() != Media::MEDIA_LYNX)
+        PrepareForHomebrew();
+}
+
+void GearlynxCore::PrepareForHomebrew()
+{
+    u16 boot_address = m_media->GetHomebrewBootAddress();
+    int size = m_media->GetROMSize();
+
+    u8* ram = m_memory->GetRAM();
+    const int ram_size = 0x10000;
+
+    memset(ram, 0, ram_size);
+
+    M6502::M6502_State* cpu = m_m6502->GetState();
+    cpu->A.SetValue(0x00);
+    cpu->X.SetValue(0x00);
+    cpu->Y.SetValue(0x00);
+    cpu->S.SetValue(0xFF);
+    cpu->P.SetValue(0x34);
+
+    if (m_media->GetType() == Media::MEDIA_EPYX_HEADERLESS)
+    {
+        u8 decrypted[256];
+        int decrypted_size = m_media->DecryptEpyxLoader(decrypted, sizeof(decrypted));
+
+        if (decrypted_size > 0)
+        {
+            Debug("EPYX headerless: copying %d decrypted bytes to 0x%04X", decrypted_size, boot_address);
+            memcpy(ram + boot_address, decrypted, decrypted_size);
+        }
+        else
+        {
+            Error("EPYX headerless decryption failed");
+            return;
+        }
+    }
+    else
+    {
+        // For BS93 homebrew: copy ROM directly to RAM at boot address
+        if (size <= 0)
+            return;
+
+        u8* rom = m_media->GetROM();
+
+        const int start = (int)boot_address;
+        const int first = MIN(size, ram_size - start);
+        const int left  = size - first;
+
+        if (first > 0)
+            memcpy(ram + start, rom, first);
+        if (left  > 0)
+            memcpy(ram, rom + first, MIN(left, ram_size));
+    }
+
+    cpu->PC.SetValue(boot_address);
+    m_m6502->DisassembleNextOPCode();
+
+    m_mikey->Write(MIKEY_TIM0BKUP, 0x9E);
+    m_mikey->Write(MIKEY_TIM0CTLA, 0x18);
+    m_mikey->Write(MIKEY_TIM2BKUP, 0x68);
+    m_mikey->Write(MIKEY_TIM2CTLA, 0x1F);
+    m_mikey->Write(MIKEY_DISPCTL, 0x09);
+    m_mikey->Write(MIKEY_PBKUP, 0x29);
+
+    for (int address = 0xFDA0; address < 0xFDC0; address++)
+        m_mikey->Write(address, 0x00);
+
+    m_memory->Write(0xFFF9, 0x0C);
+}

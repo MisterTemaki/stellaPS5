@@ -1,0 +1,413 @@
+/*
+ * Gearlynx - Lynx Emulator
+ * Copyright (C) 2025  Ignacio Sanchez
+
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * any later version.
+
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see http://www.gnu.org/licenses/
+ *
+ */
+
+#ifndef COMMON_H
+#define COMMON_H
+
+#include <stdlib.h>
+#include <cctype>
+#include <string>
+#include <string.h>
+#if defined(_WIN32)
+#include <direct.h>
+#include <windows.h>
+#else
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <errno.h>
+#endif
+#include "defines.h"
+#include "types.h"
+#include "log.h"
+#include "bit_ops.h"
+#define MINIZ_NO_ZLIB_COMPATIBLE_NAMES
+#include <miniz.h>
+#undef MINIZ_NO_ZLIB_COMPATIBLE_NAMES
+
+inline u16 read_u16_le(const u8* p)
+{
+    return (u16)p[0] | ((u16)p[1] << 8);
+}
+
+inline u32 read_u32_le(const u8* p)
+{
+    return (u32)p[0] | ((u32)p[1] << 8) | ((u32)p[2] << 16) | ((u32)p[3] << 24);
+}
+
+inline void write_u16_le(u8* p, u16 value)
+{
+    p[0] = (u8)(value >> 0);
+    p[1] = (u8)(value >> 8);
+}
+
+inline void write_u32_le(u8* p, u32 value)
+{
+    p[0] = (u8)(value >> 0);
+    p[1] = (u8)(value >> 8);
+    p[2] = (u8)(value >> 16);
+    p[3] = (u8)(value >> 24);
+}
+
+inline u32 utf8_decode_next(const char* text, size_t length, size_t& index)
+{
+    const u8* data = (const u8*)text;
+    u32 codepoint = data[index++];
+
+    if (codepoint < 0x80)
+        return codepoint;
+
+    if (((codepoint & 0xE0) == 0xC0) && (index < length) && ((data[index] & 0xC0) == 0x80))
+    {
+        codepoint = ((codepoint & 0x1F) << 6) | (data[index++] & 0x3F);
+        return codepoint >= 0x80 ? codepoint : 0xFFFD;
+    }
+
+    if (((codepoint & 0xF0) == 0xE0) && ((index + 1) < length) &&
+        ((data[index] & 0xC0) == 0x80) && ((data[index + 1] & 0xC0) == 0x80))
+    {
+        codepoint = ((codepoint & 0x0F) << 12) | ((data[index] & 0x3F) << 6) | (data[index + 1] & 0x3F);
+        index += 2;
+        if ((codepoint >= 0x800) && ((codepoint < 0xD800) || (codepoint > 0xDFFF)))
+            return codepoint;
+        return 0xFFFD;
+    }
+
+    if (((codepoint & 0xF8) == 0xF0) && ((index + 2) < length) &&
+        ((data[index] & 0xC0) == 0x80) && ((data[index + 1] & 0xC0) == 0x80) &&
+        ((data[index + 2] & 0xC0) == 0x80))
+    {
+        codepoint = ((codepoint & 0x07) << 18) | ((data[index] & 0x3F) << 12) |
+                    ((data[index + 1] & 0x3F) << 6) | (data[index + 2] & 0x3F);
+        index += 3;
+        return ((codepoint >= 0x10000) && (codepoint <= 0x10FFFF)) ? codepoint : 0xFFFD;
+    }
+
+    return 0xFFFD;
+}
+
+inline u16 read_u16_be(const u8* p)
+{
+    return (u16)p[1] | ((u16)p[0] << 8);
+}
+
+inline u32 read_u24_be(const u8* p)
+{
+    return (u32)p[2] | ((u32)p[1] << 8) | ((u32)p[0] << 16);
+}
+
+inline u32 read_u32_be(const u8* p)
+{
+    return (u32)p[3] | ((u32)p[2] << 8) | ((u32)p[1] << 16) | ((u32)p[0] << 24);
+}
+
+inline u64 read_u64_be(const u8* p)
+{
+    return ((u64)read_u32_be(p) << 32) | read_u32_be(p + 4);
+}
+
+inline void write_u16_be(u8* p, u16 value)
+{
+    p[0] = (u8)(value >> 8);
+    p[1] = (u8)value;
+}
+
+inline void write_u32_be(u8* p, u32 value)
+{
+    p[0] = (u8)(value >> 24);
+    p[1] = (u8)(value >> 16);
+    p[2] = (u8)(value >> 8);
+    p[3] = (u8)value;
+}
+
+inline void write_u64_be(u8* p, u64 value)
+{
+    write_u32_be(p, (u32)(value >> 32));
+    write_u32_be(p + 4, (u32)value);
+}
+
+inline u8 hi(u16 a)
+{
+    return (u8)(a >> 8);
+}
+
+inline u8 lo(u16 a)
+{
+    return (u8)(a & 0xFF);
+}
+
+inline int as_hex(const char c)
+{
+    if (c >= '0' && c <= '9')
+        return c - '0';
+    if (c >= 'a' && c <= 'f')
+        return c - 'a' + 0xA;
+    if (c >= 'A' && c <= 'F')
+        return c - 'A' + 0xA;
+    return 0;
+}
+
+inline u32 pow_2_ceil(u32 n)
+{
+    --n;
+    n |= n >> 1;
+    n |= n >> 2;
+    n |= n >> 4;
+    n |= n >> 8;
+    n |= n >> 16;
+    ++n;
+    return n;
+}
+
+inline bool is_pow2(u32 x)
+{
+    return x && ((x & (x - 1)) == 0);
+}
+
+inline bool is_hex_digit(char c)
+{
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+}
+
+template<typename T>
+inline bool parse_hex_string(const char* str, size_t len, T* result, size_t max_digits = sizeof(T) * 2)
+{
+    if (len == 0)
+        return false;
+
+    while (len > 1 && str[0] == '0')
+    {
+        str++;
+        len--;
+    }
+
+    if (len > max_digits)
+        return false;
+
+    *result = 0;
+    for (size_t i = 0; i < len; i++)
+    {
+        if (!is_hex_digit(str[i]))
+            return false;
+
+        *result = (*result << 4);
+
+        if (str[i] >= '0' && str[i] <= '9')
+            *result |= (str[i] - '0');
+        else if (str[i] >= 'a' && str[i] <= 'f')
+            *result |= (str[i] - 'a' + 10);
+        else // (str[i] >= 'A' && str[i] <= 'F')
+            *result |= (str[i] - 'A' + 10);
+    }
+    return true;
+}
+
+inline bool parse_hex_string(const char* str, size_t len, u8* result)
+{
+    return parse_hex_string<u8>(str, len, result, 2);
+}
+
+inline bool parse_hex_string(const char* str, size_t len, u16* result)
+{
+    return parse_hex_string<u16>(str, len, result, 4);
+}
+
+inline bool parse_hex_string(const char* str, size_t len, u32* result)
+{
+    return parse_hex_string<u32>(str, len, result, 8);
+}
+
+template<typename T>
+inline bool parse_hex_with_prefix(const std::string& hex_str, T* result)
+{
+    const char* str = hex_str.c_str();
+    size_t len = hex_str.length();
+
+    if (len >= 2 && str[0] == '0' && (str[1] == 'x' || str[1] == 'X'))
+    {
+        str += 2;
+        len -= 2;
+    }
+    else if (len >= 1 && str[0] == '$')
+    {
+        str += 1;
+        len -= 1;
+    }
+
+    return parse_hex_string(str, len, result);
+}
+
+inline char* strncpy_fit(char* dest, const char* src, size_t dest_size)
+{
+    if (dest_size == 0)
+        return dest;
+
+    size_t copy_size = strlen(src);
+    if (copy_size >= dest_size)
+        copy_size = dest_size - 1;
+
+    memcpy(dest, src, copy_size);
+    dest[copy_size] = '\0';
+
+    return dest;
+}
+
+inline char* strncat_fit(char* dest, const char* src, size_t dest_size)
+{
+    if (dest_size == 0)
+        return dest;
+
+    size_t len = strlen(dest);
+    if (len + 1 >= dest_size)
+        return dest;
+
+    return strncat(dest, src, dest_size - len - 1);
+}
+
+inline bool strings_equal_ignore_case(const std::string& left, const std::string& right)
+{
+    if (left.size() != right.size())
+        return false;
+
+    for (size_t i = 0; i < left.size(); i++)
+    {
+        unsigned char left_char = (unsigned char)left[i];
+        unsigned char right_char = (unsigned char)right[i];
+        if (std::tolower(left_char) != std::tolower(right_char))
+            return false;
+    }
+
+    return true;
+}
+
+inline void append_path_component(std::string& path, const char* component)
+{
+    if (path.length() > 0)
+    {
+        char last = path[path.length() - 1];
+        if (last != '/' && last != '\\')
+        {
+#if defined(_WIN32)
+            path += "\\";
+#else
+            path += "/";
+#endif
+        }
+    }
+
+    path += component;
+}
+
+#if defined(_WIN32)
+inline std::wstring utf8_to_wstring(const char* utf8_str)
+{
+    if (!utf8_str || utf8_str[0] == '\0')
+        return std::wstring();
+
+    int size_needed = MultiByteToWideChar(CP_UTF8, 0, utf8_str, -1, NULL, 0);
+    if (size_needed <= 0)
+        return std::wstring();
+
+    std::wstring wstr(size_needed, 0);
+    MultiByteToWideChar(CP_UTF8, 0, utf8_str, -1, &wstr[0], size_needed);
+    return wstr;
+}
+
+inline std::string wstring_to_utf8(const wchar_t* wide_str)
+{
+    if (!wide_str || wide_str[0] == L'\0')
+        return std::string();
+
+    int size_needed = WideCharToMultiByte(CP_UTF8, 0, wide_str, -1, NULL, 0, NULL, NULL);
+    if (size_needed <= 0)
+        return std::string();
+
+    std::string str(size_needed, 0);
+    WideCharToMultiByte(CP_UTF8, 0, wide_str, -1, &str[0], size_needed, NULL, NULL);
+    str.resize(size_needed - 1);
+    return str;
+}
+
+#define open_ifstream_utf8(stream, path, mode) \
+    do { \
+        std::wstring wpath = utf8_to_wstring(path); \
+        stream.open(wpath.c_str(), mode); \
+    } while(0)
+
+#define open_ofstream_utf8(stream, path, mode) \
+    do { \
+        std::wstring wpath = utf8_to_wstring(path); \
+        stream.open(wpath.c_str(), mode); \
+    } while(0)
+
+inline FILE* fopen_utf8(const char* path, const char* mode)
+{
+    std::wstring wpath = utf8_to_wstring(path);
+    std::wstring wmode = utf8_to_wstring(mode);
+    return _wfopen(wpath.c_str(), wmode.c_str());
+}
+
+inline bool rename_file_utf8(const char* from, const char* to)
+{
+    std::wstring wfrom = utf8_to_wstring(from);
+    std::wstring wto = utf8_to_wstring(to);
+    return MoveFileExW(wfrom.c_str(), wto.c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
+}
+
+inline bool remove_file_utf8(const char* path)
+{
+    std::wstring wpath = utf8_to_wstring(path);
+    return DeleteFileW(wpath.c_str()) != 0;
+}
+#else
+#define open_ifstream_utf8(stream, path, mode) \
+    stream.open(path, mode)
+
+#define open_ofstream_utf8(stream, path, mode) \
+    stream.open(path, mode)
+
+inline FILE* fopen_utf8(const char* path, const char* mode)
+{
+    return fopen(path, mode);
+}
+
+inline bool rename_file_utf8(const char* from, const char* to)
+{
+    return rename(from, to) == 0;
+}
+
+inline bool remove_file_utf8(const char* path)
+{
+    return remove(path) == 0;
+}
+#endif
+
+inline bool create_directory_if_not_exists(const char* path)
+{
+#if defined(_WIN32)
+    int res = _wmkdir(utf8_to_wstring(path).c_str());
+#else
+    int res = mkdir(path, 0755);
+#endif
+    if (res == 0 || errno == EEXIST)
+        return true;
+    else
+        return false;
+}
+
+#endif /* COMMON_H */

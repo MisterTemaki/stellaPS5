@@ -1,0 +1,461 @@
+/*
+ * Gearlynx - Lynx Emulator
+ * Copyright (C) 2025  Ignacio Sanchez
+
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * any later version.
+
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see http://www.gnu.org/licenses/
+ *
+ */
+
+#include <string.h>
+#include <fstream>
+#include "eeprom.h"
+#include "bit_ops.h"
+#include "state_serializer.h"
+#include "trace_logger.h"
+
+EEPROM::EEPROM()
+{
+    InitPointer(m_trace_logger);
+    Reset(GLYNX_EEPROM_NONE);
+}
+
+EEPROM::~EEPROM()
+{
+}
+
+void EEPROM::SetTraceLogger(TraceLogger* trace_logger)
+{
+    m_trace_logger = trace_logger;
+}
+
+void EEPROM::LogEEPROMEvent(u8 operation, u16 address, u16 value)
+{
+#if !defined(GLYNX_DISABLE_DISASSEMBLER)
+    if (operation == TRACE_EEPROM_WRITE || operation == TRACE_EEPROM_ERASE)
+        m_trace_programming = true;
+    GLYNX_Trace_Entry entry = {};
+    entry.type = TRACE_CARTRIDGE;
+    entry.cart.event = TRACE_CARTRIDGE_EEPROM;
+    entry.cart.operation = operation;
+    entry.cart.address = address;
+    entry.cart.value = value;
+    entry.cart.data_bits = (m_type & GLYNX_EEPROM_8BIT) ? 8 : 16;
+    entry.cart.write = operation != TRACE_EEPROM_READ && operation != TRACE_EEPROM_READY;
+    m_trace_logger->TraceLog(entry);
+#else
+    UNUSED(operation);
+    UNUSED(address);
+    UNUSED(value);
+#endif
+}
+
+void EEPROM::Reset(GLYNX_EEPROM type)
+{
+    m_state = EE_NONE;
+    m_data = 0;
+    m_addr = 0;
+    m_read_data = 0;
+    m_audin_output = true;
+    m_readonly = true;
+    m_dirty = false;
+    m_programming = false;
+#if !defined(GLYNX_DISABLE_DISASSEMBLER)
+    m_trace_programming = false;
+#endif
+    m_busy_count = 100;  // Start in ready state
+    m_last_cs = false;
+    m_last_clk = false;
+    m_addr_bits = 0;
+    m_done_mask = 0;
+    m_iodir = 0;
+    m_iodat = 0;
+    memset(m_rom_data, 0xFF, sizeof(m_rom_data));
+    SetType(type);
+}
+
+s32 EEPROM::GetSize()
+{
+    if (!IsAvailable())
+        return 0;
+
+    s32 base_type = m_type & 0x0F;
+    s32 size = 0;
+
+    switch (base_type)
+    {
+        case GLYNX_EEPROM_93C46:
+            size = 128;
+            break;
+        case GLYNX_EEPROM_93C56:
+            size = 256;
+            break;
+        case GLYNX_EEPROM_93C66:
+            size = 512;
+            break;
+        case GLYNX_EEPROM_93C76:
+            size = 1024;
+            break;
+        case GLYNX_EEPROM_93C86:
+            size = 2048;
+            break;
+        default:
+            size = 128;
+            break;
+    }
+
+    return size;
+}
+
+#if !defined(GLYNX_DISABLE_DISASSEMBLER)
+void EEPROM::ProcessEepromCounter(u16 counter, bool trace)
+#else
+void EEPROM::ProcessEepromCounter(u16 counter)
+#endif
+{
+    if (!IsAvailable())
+        return;
+
+    // CS from counter bit 7
+    bool cs = IS_SET_BIT(counter, 7);
+
+    // CLK from counter bit 1
+    bool clk = IS_SET_BIT(counter, 1);
+
+    // DI comes from IODAT bit 4 (AUDIN) when IODIR bit 4 is set (output)
+    bool di = false;
+    if (IS_SET_BIT(m_iodir, 4))
+        di = IS_SET_BIT(m_iodat, 4);
+
+    // CS falling edge resets command state
+    if (!cs && m_last_cs)
+    {
+        //Debug("EEPROM: CS LOW, state was %d data=%04X", m_state, m_data);
+        m_state = EE_NONE;
+        m_data = 0;
+    }
+
+    // CS rising edge - prepare for start bit detection
+    if (cs && !m_last_cs)
+    {
+        //Debug("EEPROM: CS HIGH");
+        m_state = EE_NONE;
+        m_data = 0;
+    }
+
+    m_last_cs = cs;
+
+    // Only process data on rising CLK edge when CS is high
+    if (!cs || !clk || m_last_clk)
+    {
+        m_last_clk = clk;
+        return;
+    }
+
+    m_last_clk = clk;
+
+    // In EE_NONE state, look for start bit (DI = 1)
+    if (m_state == EE_NONE)
+    {
+        if (di)
+        {
+            //Debug("EEPROM: START mask=%04X", m_done_mask);
+            m_data = 0x01;  // Start bit
+            m_state = EE_ADDR;
+        }
+        return;
+    }
+
+    // Shift in data bit
+    m_data = (m_data << 1) | (di ? 1 : 0);
+
+    switch (m_state)
+    {
+        case EE_NONE:
+            // Should not reach here - start detection handled above
+            break;
+
+        case EE_ADDR:
+            if (m_data & m_done_mask)
+            {
+                //Debug("EEPROM: CMD data=%04X mask=%04X", m_data, m_done_mask);
+                // Extract opcode (2 bits after start bit)
+                s32 opcode = (m_data >> m_addr_bits) & 0x03;
+                m_addr = m_data & ((1 << m_addr_bits) - 1);
+
+                switch (opcode)
+                {
+                    case 0x02:  // READ
+                        // Don't pre-shift 8-bit data - output bit check uses done_mask >> 1
+                        if (m_type & GLYNX_EEPROM_8BIT)
+                            m_read_data = ((u8*)m_rom_data)[m_addr];
+                        else
+                            m_read_data = m_rom_data[m_addr];
+#if !defined(GLYNX_DISABLE_DISASSEMBLER)
+                        if (trace)
+                            TraceEEPROMEvent(TRACE_EEPROM_READ, m_addr, m_read_data);
+#else
+                        TraceEEPROMEvent(TRACE_EEPROM_READ, m_addr, m_read_data);
+#endif
+                        m_audin_output = false;  // Dummy bit
+                        m_programming = false;   // Reading, not programming
+                        m_state = EE_WAIT;
+                        //Debug("EEPROM READ addr: 0x%02X, data: 0x%04X", m_addr, m_read_data);
+                        break;
+
+                    case 0x01:  // WRITE
+                        m_data = 0x01;
+                        m_state = EE_DATA;
+                        //Debug("EEPROM WRITE addr: 0x%02X", m_addr);
+                        break;
+
+                    case 0x00:  // Extended commands
+                        {
+                            s32 ext_cmd = (m_data >> (m_addr_bits - 2)) & 0x03;
+                            switch (ext_cmd)
+                            {
+                                case 0x00:  // EWDS - Erase/Write Disable
+                                    m_readonly = true;
+#if !defined(GLYNX_DISABLE_DISASSEMBLER)
+                                    if (trace)
+                                        TraceEEPROMEvent(TRACE_EEPROM_EWDS, m_addr, 0);
+#else
+                                    TraceEEPROMEvent(TRACE_EEPROM_EWDS, m_addr, 0);
+#endif
+                                    //Debug("EEPROM EWDS");
+                                    break;
+                                case 0x03:  // EWEN - Erase/Write Enable
+                                    m_readonly = false;
+#if !defined(GLYNX_DISABLE_DISASSEMBLER)
+                                    if (trace)
+                                        TraceEEPROMEvent(TRACE_EEPROM_EWEN, m_addr, 0);
+#else
+                                    TraceEEPROMEvent(TRACE_EEPROM_EWEN, m_addr, 0);
+#endif
+                                    //Debug("EEPROM EWEN");
+                                    break;
+                                case 0x01:  // WRAL - Write All
+#if !defined(GLYNX_DISABLE_DISASSEMBLER)
+                                    if (trace)
+                                        TraceEEPROMEvent(TRACE_EEPROM_WRAL, m_addr, 0);
+#else
+                                    TraceEEPROMEvent(TRACE_EEPROM_WRAL, m_addr, 0);
+#endif
+                                    //Debug("EEPROM WRAL (not implemented)");
+                                    break;
+                                case 0x02:  // ERAL - Erase All
+#if !defined(GLYNX_DISABLE_DISASSEMBLER)
+                                    if (trace)
+                                        TraceEEPROMEvent(TRACE_EEPROM_ERAL, m_addr, 0);
+#else
+                                    TraceEEPROMEvent(TRACE_EEPROM_ERAL, m_addr, 0);
+#endif
+                                    //Debug("EEPROM ERAL (not implemented)");
+                                    break;
+                            }
+                        }
+                        m_state = EE_NONE;
+                        break;
+
+                    case 0x03:  // ERASE
+                        if (!m_readonly)
+                        {
+                            if (m_type & GLYNX_EEPROM_8BIT)
+                                ((u8*)m_rom_data)[m_addr] = 0xFF;
+                            else
+                                m_rom_data[m_addr] = 0xFFFF;
+                            m_dirty = true;
+                            //Debug("EEPROM ERASE addr: 0x%02X", m_addr);
+                        }
+                        m_busy_count = 0;
+                        m_programming = true;    // Programming mode
+                        m_audin_output = false;  // Busy
+                        m_state = EE_WAIT;
+#if !defined(GLYNX_DISABLE_DISASSEMBLER)
+                        if (trace)
+                            TraceEEPROMEvent(TRACE_EEPROM_ERASE, m_addr,
+                                (m_type & GLYNX_EEPROM_8BIT) ? 0x00FF : 0xFFFF);
+#else
+                        TraceEEPROMEvent(TRACE_EEPROM_ERASE, m_addr,
+                            (m_type & GLYNX_EEPROM_8BIT) ? 0x00FF : 0xFFFF);
+#endif
+                        break;
+                }
+            }
+            break;
+
+        case EE_DATA:
+            {
+                u32 data_done_mask = (m_type & GLYNX_EEPROM_8BIT) ? 0x0100 : 0x10000;
+                if (m_data & data_done_mask)
+                {
+                    u16 write_data = (u16)(m_data & (data_done_mask - 1));
+                    if (!m_readonly)
+                    {
+                        if (m_type & GLYNX_EEPROM_8BIT)
+                        {
+                            ((u8*)m_rom_data)[m_addr] = m_data & 0xFF;
+                            //Debug("EEPROM WRITE data: 0x%02X", m_data & 0xFF);
+                        }
+                        else
+                        {
+                            m_rom_data[m_addr] = m_data & 0xFFFF;
+                            //Debug("EEPROM WRITE data: 0x%04X", m_data & 0xFFFF);
+                        }
+                        m_dirty = true;
+                    }
+                    m_busy_count = 0;
+                    m_programming = true;    // Programming mode
+                    m_audin_output = false;  // Busy (ready signal)
+                    m_state = EE_WAIT;
+#if !defined(GLYNX_DISABLE_DISASSEMBLER)
+                    if (trace)
+                        TraceEEPROMEvent(TRACE_EEPROM_WRITE, m_addr, write_data);
+#else
+                    TraceEEPROMEvent(TRACE_EEPROM_WRITE, m_addr, write_data);
+#endif
+                }
+            }
+            break;
+
+        case EE_WAIT:
+            if (m_programming)
+            {
+                // Programming mode (WRITE/ERASE): just stay in busy/ready state
+                // m_audin_output is managed by ProcessBusy()
+            }
+            else
+            {
+                // Read mode: shift out read data from MSB
+                if (m_type & GLYNX_EEPROM_8BIT)
+                    m_audin_output = (m_read_data & 0x80) != 0;
+                else
+                    m_audin_output = (m_read_data & 0x8000) != 0;
+                m_read_data <<= 1;
+            }
+            break;
+
+        case EE_BUSY:
+            // EE_BUSY state is handled by ProcessBusy() when polled via IODAT read
+            break;
+    }
+}
+
+void EEPROM::ProcessBusy()
+{
+    if (!IsAvailable())
+        return;
+
+    // After write/erase, simulate busy period then go ready
+    if (m_programming && m_busy_count < 100)
+    {
+        m_busy_count++;
+        if (m_busy_count >= 100)
+        {
+            m_audin_output = true;  // Ready
+            m_programming = false;  // Done programming
+#if !defined(GLYNX_DISABLE_DISASSEMBLER)
+            if (m_trace_programming)
+                TraceEEPROMEvent(TRACE_EEPROM_READY, m_addr, 0);
+            m_trace_programming = false;
+#endif
+        }
+    }
+}
+
+void EEPROM::SetType(GLYNX_EEPROM type)
+{
+    m_type = type;
+
+    s32 base_type = m_type & 0x0F;
+
+    switch (base_type)
+    {
+        case GLYNX_EEPROM_93C46:
+            m_addr_bits = 6;
+            break;
+        case GLYNX_EEPROM_93C56:
+            m_addr_bits = 7;
+            break;
+        case GLYNX_EEPROM_93C66:
+            m_addr_bits = 8;
+            break;
+        case GLYNX_EEPROM_93C76:
+            m_addr_bits = 9;
+            break;
+        case GLYNX_EEPROM_93C86:
+            m_addr_bits = 10;
+            break;
+        default:
+            m_addr_bits = 6;
+            break;
+    }
+
+    // 8-bit mode has one extra address bit
+    if (m_type & GLYNX_EEPROM_8BIT)
+        m_addr_bits++;
+
+    // done_mask: after receiving (1 start + 2 opcode + addr_bits) bits,
+    // the MSB is at position (addr_bits + 2)
+    m_done_mask = 1 << (m_addr_bits + 2);
+
+    Debug("EEPROM type set: %d, addr_bits: %d, done_mask: 0x%04X", m_type, m_addr_bits, m_done_mask);
+}
+
+void EEPROM::Erase()
+{
+    if (!IsAvailable())
+        return;
+    memset(m_rom_data, 0xFF, GetSize());
+    m_dirty = true;
+    Debug("EEPROM erased");
+}
+
+void EEPROM::SaveState(std::ostream& stream)
+{
+    StateSerializer serializer(stream);
+    Serialize(serializer);
+}
+
+void EEPROM::LoadState(std::istream& stream)
+{
+    StateSerializer serializer(stream);
+    Serialize(serializer);
+#if !defined(GLYNX_DISABLE_DISASSEMBLER)
+    m_trace_programming = false;
+#endif
+}
+
+void EEPROM::Serialize(StateSerializer& s)
+{
+    s32 state = static_cast<s32>(m_state);
+
+    G_SERIALIZE(s, state);
+    G_SERIALIZE(s, m_data);
+    G_SERIALIZE(s, m_addr);
+    G_SERIALIZE(s, m_read_data);
+    G_SERIALIZE(s, m_audin_output);
+    G_SERIALIZE(s, m_readonly);
+    G_SERIALIZE(s, m_dirty);
+    G_SERIALIZE(s, m_programming);
+    G_SERIALIZE(s, m_busy_count);
+    G_SERIALIZE(s, m_last_cs);
+    G_SERIALIZE(s, m_last_clk);
+    G_SERIALIZE(s, m_iodir);
+    G_SERIALIZE(s, m_iodat);
+
+    s32 eeprom_size = GetSize();
+    G_SERIALIZE_ARRAY(s, (u8*)m_rom_data, eeprom_size);
+
+    m_state = static_cast<EepromState>(state);
+}

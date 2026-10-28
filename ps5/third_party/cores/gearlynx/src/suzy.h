@@ -1,0 +1,364 @@
+/*
+ * Gearlynx - Lynx Emulator
+ * Copyright (C) 2025  Ignacio Sanchez
+
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * any later version.
+
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see http://www.gnu.org/licenses/
+ *
+ */
+
+#ifndef SUZY_H
+#define SUZY_H
+
+#include <iostream>
+#include <fstream>
+#include <vector>
+#include "common.h"
+#include "suzy_defines.h"
+
+class Media;
+class Memory;
+class M6502;
+class Input;
+class Bus;
+class StateSerializer;
+class TraceLogger;
+class Mikey;
+
+class Suzy
+{
+public:
+    struct Suzy_State
+    {
+        u16_union TMPADR;
+        u16_union TILTACUM;
+        u16_union HOFF;
+        u16_union VOFF;
+        u16_union VIDBAS;
+        u16_union COLLBAS;
+        u16_union VIDADR;
+        u16_union COLLADR;
+        u16_union SCBNEXT;
+        u16_union SPRDLINE;
+        u16_union HPOSSTRT;
+        u16_union VPOSSTRT;
+        u16_union SPRHSIZ;
+        u16_union SPRVSIZ;
+        u16_union STRETCH;
+        u16_union TILT;
+        u16_union SPRDOFF;
+        u16_union SPRVPOS;
+        u16_union COLLOFF;
+        u16_union VSIZACUM;
+        u16_union HSIZOFF;
+        u16_union VSIZOFF;
+        u16_union SCBADR;
+        u16_union PROCADR;
+        u8 SPRCTL0, SPRCTL1, SPRCOLL, SPRINIT, SUZYBUSEN, SPRGO;
+        bool sprsys_sign;
+        bool sprsys_accumulate;
+        bool sprsys_dontcollide;
+        bool sprsys_vstrech;
+        bool sprsys_lefthand;
+        bool sprsys_unsafe;
+        bool sprsys_stopsprites;
+        bool sprsys_mathbusy;
+        bool sprsys_mathbit;
+        bool sprsys_lastcarrybit;
+        bool sprsys_spritesbusy;
+        u8 pen_map[16];
+        u32 sprite_cycles;
+        u32 math_cycles;
+        bool math_sign_A;
+        bool math_sign_C;
+        u16 shift_register_address;
+        u8 shift_register_current;
+        s32 shift_register_bit;
+        u8 fred;
+        bool everon;
+        u8 fsm_phase;
+        u8 spr_quadrant;
+        s16 quad_row;
+        s16 quad_pixel_height;
+        bool sprite_row_started;
+        bool row_pipeline_warm;
+        bool scb_control_line_pending;
+        s16 row_x;
+        s16 row_emit_count;
+        u16 row_h_accum;
+        u32 row_expansion_outputs;
+        u8 row_render;
+        u8 row_pen;
+        u8 pack_state;
+        u8 pack_count;
+        u8 pack_pen;
+        u8 pack_is_literal;
+        u8 pack_pixel_pair;
+        bool row_packed_rle_seen;
+        u32 row_collision_burst_mask;
+        u32 row_collision_read_burst_mask;
+        u32 row_collision_group_mask;
+        u32 row_collision_read_group_mask;
+        u32 row_video_burst_mask;
+        u32 row_video_read_burst_mask;
+        u32 row_timing_bus_ticks;
+        u32 row_timing_internal_ticks;
+        u32 row_timing_internal_base_ticks;
+        u32 row_timing_charged_ticks;
+        u32 row_source_bytes;
+        u32 row_source_pixels;
+        u32 row_output_pixels;
+        u32 row_packed_packet_ticks;
+        s32 row_packed_literal_excess;
+        u32 row_packed_builder_stall_ticks;
+        u32 row_packed_literal_start_pixels;
+        bool row_packed_literal_run;
+        u32 row_video_pixels;
+        u32 row_video_words;
+        bool expansion_fifo_primed;
+        bool row_lcd_dma_granted;
+        u32 lcd_dma_pending_ticks;
+    };
+
+    // Math register macros - these are physically the same as sprite registers
+    // due to hardware design (only 48 physical registers exist)
+    #define REG_MATHD m_state.SPRDLINE.low      // FC52 = FC12
+    #define REG_MATHC m_state.SPRDLINE.high     // FC53 = FC13
+    #define REG_MATHB m_state.HPOSSTRT.low      // FC54 = FC14
+    #define REG_MATHA m_state.HPOSSTRT.high     // FC55 = FC15
+    #define REG_MATHP m_state.VPOSSTRT.low      // FC56 = FC16
+    #define REG_MATHN m_state.VPOSSTRT.high     // FC57 = FC17
+    #define REG_MATHH m_state.SPRDOFF.low       // FC60 = FC20
+    #define REG_MATHG m_state.SPRDOFF.high      // FC61 = FC21
+    #define REG_MATHF m_state.SPRVPOS.low       // FC62 = FC22
+    #define REG_MATHE m_state.SPRVPOS.high      // FC63 = FC23
+    #define REG_MATHM m_state.SCBADR.low        // FC6C = FC2C
+    #define REG_MATHL m_state.SCBADR.high       // FC6D = FC2D
+    #define REG_MATHK m_state.PROCADR.low       // FC6E = FC2E
+    #define REG_MATHJ m_state.PROCADR.high      // FC6F = FC2F
+
+public:
+    Suzy(Media* media, M6502* m6502, Input* input, Bus* bus);
+    ~Suzy();
+    void Init(Memory* memory, Mikey* mikey);
+    void Reset();
+    void Clock(u32 cycles);
+    u32 ApplyBusStall(u32* cycles, u32 stolen_cycles);
+    template<bool debug = false> u8 Read(u16 address);
+    template<bool debug = false> void Write(u16 address, u8 value);
+    Suzy_State* GetState();
+    bool IsBlitterBusy();
+    bool IsBusEnabled();
+    void SetFastSpriteRendering(bool enabled);
+    void SetTraceLogger(TraceLogger* trace_logger);
+#if !defined(GLYNX_DISABLE_DISASSEMBLER)
+    void ResetTraceEventPairing();
+#endif
+
+#if !defined(GLYNX_DISABLE_DISASSEMBLER)
+    struct GLYNX_Sprite_Bounding_Box
+    {
+        s32 x0;
+        s32 y0;
+        s32 x1;
+        s32 y1;
+        u8 frames_left;
+    };
+
+    struct GLYNX_SCB_Info
+    {
+        u16 scb_address;
+        u16 scb_next;
+        u8 sprctl0;
+        u8 sprctl1;
+        u8 sprcoll;
+        s16 hpos;
+        s16 vpos;
+        u16 sprdline;
+        u16 sprhsiz;
+        u16 sprvsiz;
+        u16 stretch;
+        u16 tilt;
+        u8 pen_map[16];
+        bool skipped;
+        s16 hoff;
+        s16 voff;
+    };
+    std::vector<GLYNX_SCB_Info>* GetFrameSCBList();
+    void SwapFrameSCBList();
+    void SetSCBAccumulationEnabled(bool enabled);
+    void SetSpriteBoundingBox(GLYNX_Sprite_Bounding_Box_Mode mode, int decay);
+    std::vector<GLYNX_Sprite_Bounding_Box>* GetSpriteBoundingBoxList();
+    void BeginSpriteBoundingBoxFrame();
+    void EndSpriteBoundingBoxFrame();
+#endif
+
+    void SaveState(std::ostream& stream);
+    void LoadState(std::istream& stream, int version);
+
+private:
+    enum SuzyPhase
+    {
+        SUZY_PHASE_IDLE = 0,
+        SUZY_PHASE_LEGACY_DELAY,
+        SUZY_PHASE_SCB_FETCH,
+        SUZY_PHASE_SCB_RELOAD,
+        SUZY_PHASE_PALETTE,
+        SUZY_PHASE_QUAD_INIT,
+        SUZY_PHASE_LINE_FETCH,
+        SUZY_PHASE_ROW_BEGIN,
+        SUZY_PHASE_ROW_PAINT,
+        SUZY_PHASE_ROW_END,
+        SUZY_PHASE_QUAD_END,
+        SUZY_PHASE_SPR_END,
+        SUZY_PHASE_SCB_NEXT
+    };
+
+    enum SuzyPackState
+    {
+        SUZY_PACK_HEADER = 0,
+        SUZY_PACK_LITERAL,
+        SUZY_PACK_RLE_PEN,
+        SUZY_PACK_RLE
+    };
+
+    void SpritesGo();
+    void AddSpriteCycles(u32 cycles);
+    bool RowPipelineIsWarm();
+    void ClearRowPipelineTiming();
+    void ResetRowPipelineTiming(bool visible, bool process_pixels = true, bool literal_2bpp_natural_eof = false);
+    void UpdateRowPipelineTiming();
+    void UpdateRowPipelineInternalTiming(u32 pipeline_pixels, int literal_bpp);
+    void UpdateRowPipeline2bppTiming();
+    void UpdateRowPipeline3bppTiming();
+    void DiscardRowPipeline3bppClippedOutput();
+    void UpdateRowPipeline4bppTiming();
+    void FinalizeRowPipelineLowerDepthCollisionTiming(s32 dx);
+    u32 GetRowPipelinePackedLiteralTicks(bool finalizing);
+    void UpdateRowPipelinePackedTiming();
+    void FinalizeRowPipelinePackedLiteralRun();
+    void FinalizeRowPipelinePackedTiming();
+    void AddRowPipelineBusTicks(u32 ticks);
+    void AddRowPipelineSourceByte();
+    u32 GetRowPipelinePixelTicks(u32 pixels, int literal_bpp);
+    void AddRowPipelineSourcePixel(int literal_bpp);
+    void AddRowPipelinePackedPacket(bool literal, u32 count);
+    void AddRowPipelineOutputPixel(int literal_bpp);
+    void AddRowPipelineVideoPixel(int literal_bpp);
+    void AddRowPipelineVideoReadPixel(int literal_bpp);
+    void AddRowPipelineCollisionPixel();
+    void AddRowPipelineCollisionReadPixel();
+    void AddRowPipelineCollisionBusTicks(u32 ticks, int literal_bpp);
+    void AddRowPipelineVideoWord();
+    void StepBlitter(u32 cycles);
+    bool ConsumeBlitterCycleDebt(u32* cycles);
+    void StepBlitterPhase();
+    void FinishBlitter();
+    void SignalBlitterDone();
+    void AdvanceSpriteRow(s32 dy, bool charge_transform_timing);
+    void DrawSprite();
+    u32 CalculateFastLiteralRowTicks(u32 source_bytes, u32 source_pixels,
+            u32 output_pixels, s32 x, s32 dx, int bpp, u16 hsiz);
+    void DrawSpriteLineLiteral(u16 data_begin, u16 data_end, s32 x, s32 y, s32 dx, int bpp, int type, u16 hsiz, u32 haccum_init, bool collide, u8 collision_id);
+    void DrawSpriteLinePacked(u16 data_begin, u16 data_end, s32 x, s32 y, s32 dx, int bpp, int type, u16 hsiz, u32 haccum_init, bool collide, u8 collision_id);
+    bool DrawSpriteLineLiteralStep(u16 data_end, s32 dx, int bpp, int type, bool collide, u8 collision_id);
+    bool DrawSpriteLinePackedStep(u16 data_end, s32 dx, int bpp, int type, bool collide, u8 collision_id);
+    bool DrawSpriteEmitPen(u8 pen, s32 dx, int type, bool collide, u8 collision_id, int literal_bpp);
+#if !defined(GLYNX_DISABLE_DISASSEMBLER)
+    void BeginSpriteBoundingBox();
+    void AddSpriteBoundingBox();
+#endif
+    void AddPackedPixelTicks(bool pipeline_timing, bool charge_timing);
+    void DrawPixel(s32 x, s32 y, u8 pen, int type, bool collide, u8 collision_id, bool pipeline_timing, int literal_bpp);
+    u8 RamRead(u16 address);
+    u16 RamReadWord(u16 address);
+    void RamWrite(u16 address, u8 value);
+    void ShiftRegisterReset(u16 address, bool pipeline_timing);
+    u32 ShiftRegisterGetBits(int n, u16 stop_addr, bool pipeline_timing);
+    void UpdateMath(u32 cycles);
+    void MathRunMultiply();
+    void MathRunDivide();
+    bool MathIsNegative(u16 value);
+    INLINE void TraceMathOperationEvent(u32 op_a, u32 op_b, u32 result, u16 remainder,
+        bool divide, bool sign, bool accumulate, bool div_by_zero, u32 elapsed_cycles);
+    INLINE void TraceMathCompletionEvent();
+    INLINE void TraceSpriteEvent(u8 event, u8 reason = 0);
+    INLINE void TraceSpriteBusEvent(u32 cycles, u8 reason);
+    INLINE void TraceInputEvent(u8 value, bool joystick);
+    INLINE void TraceCartridgeEvent(u8 event, u8 value, bool write, u8 bank);
+    void LogMathOperationEvent(u32 op_a, u32 op_b, u32 result, u16 remainder,
+        bool divide, bool sign, bool accumulate, bool div_by_zero, u32 elapsed_cycles);
+    void LogMathCompletionEvent();
+#if !defined(GLYNX_DISABLE_DISASSEMBLER)
+    INLINE void ResetTraceMathEventPairing();
+#endif
+    void LogSpriteEvent(u8 event, u8 reason);
+    void LogSpriteBusEvent(u32 cycles, u8 reason);
+    void LogInputEvent(u8 value, bool joystick);
+    void LogCartridgeEvent(u8 event, u8 value, bool write, u8 bank);
+    void ComputeQuadLUT();
+    void Serialize(StateSerializer& s, int version);
+
+private:
+    struct QuadPos
+    {
+        bool left;
+        bool up;
+    };
+
+private:
+    Media* m_media;
+    Memory* m_memory;
+    M6502* m_m6502;
+    Mikey* m_mikey;
+    Input* m_input;
+    Bus* m_bus;
+    Suzy_State m_state;
+    u8* m_ram;
+    TraceLogger* m_trace_logger;
+    u32 m_sprite_total_cycles;
+#if !defined(GLYNX_DISABLE_DISASSEMBLER)
+    u32 m_trace_math_op_a;
+    u32 m_trace_math_op_b;
+    u32 m_trace_math_result;
+    u32 m_trace_math_elapsed;
+    u16 m_trace_math_remainder;
+    bool m_trace_math_divide;
+    bool m_trace_math_sign;
+    bool m_trace_math_accumulate;
+    bool m_trace_math_div_by_zero;
+    bool m_trace_math_valid;
+    bool m_trace_sprite_active;
+#endif
+    QuadPos m_quad_lut[4][4][4] = {};
+    bool m_fast_sprite_rendering;
+#if !defined(GLYNX_DISABLE_DISASSEMBLER)
+    GLYNX_Sprite_Bounding_Box_Mode m_sprite_bounding_box_mode;
+    int m_sprite_bounding_box_decay;
+    bool m_sprite_bounding_box_active;
+    bool m_sprite_bounding_box_valid;
+    s32 m_sprite_bounding_box_min_x;
+    s32 m_sprite_bounding_box_min_y;
+    s32 m_sprite_bounding_box_max_x;
+    s32 m_sprite_bounding_box_max_y;
+    std::vector<GLYNX_Sprite_Bounding_Box> m_sprite_bounding_box_list;
+    std::vector<GLYNX_Sprite_Bounding_Box> m_sprite_bounding_box_list_display;
+    std::vector<GLYNX_SCB_Info> m_frame_scb_list;
+    std::vector<GLYNX_SCB_Info> m_frame_scb_list_display;
+    bool m_scb_accumulation_enabled;
+#endif
+};
+
+#include "suzy_inline.h"
+
+#endif /* SUZY_H */
