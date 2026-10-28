@@ -472,11 +472,11 @@ std::string netfs_shares_template()
 		   "# saves, states and covers stay on the console. A line that starts with # is a comment.\n"
 		   "# Passwords are kept here in plain text and can be read over FTP.\n"
 		   "#\n"
-		   "#   smb://192.168.1.50/games/nes                            guest access\n"
-		   "#   smb://jason@192.168.1.50/games/nes?password=secret      user and password\n"
+		   "#   smb://192.168.1.50/games/atari                           guest access\n"
+		   "#   smb://jason@192.168.1.50/games/atari?password=secret     user and password\n"
 		   "#   smb://WORKGROUP;jason@nas/games?password=x&vers=3&sign   domain, SMB 3, signing\n"
-		   "#   nfs://192.168.1.50/export/nes                           NFS version 3\n"
-		   "#   nfs://nas/export/nes?version=4&uid=1000&gid=100\n"
+		   "#   nfs://192.168.1.50/export/atari                          NFS version 3\n"
+		   "#   nfs://nas/export/atari?version=4&uid=1000&gid=100\n"
 		   "#\n"
 		   "# Use the server's IP address. Inside a user name, password or folder, write & = % # @ ; / ? and\n"
 		   "# spaces as %XX (UTF-8 bytes): the password p@ss&word=1 is written p%40ss%26word%3D1.\n";
@@ -750,7 +750,7 @@ bool netfs_config_from_fields(const NetfsShareFields& f, ShareConfig& out, std::
 	{
 		path = TypedPath(f.folder, false);
 		if (path.find_first_not_of("/") == std::string::npos)
-			return Fail(error, "Enter the export path, like /export/nes.");
+			return Fail(error, "Enter the export path, like /export/atari.");
 	}
 
 	std::string address = smb ? "smb://" : "nfs://";

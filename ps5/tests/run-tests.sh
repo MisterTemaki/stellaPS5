@@ -224,7 +224,7 @@ expect "grep -q 'retrying (1)' $T/root/logs/boot.log && grep -q 'scan-out 1920x1
 fi
 
 if want 9; then
-echo "== 9. StellaPS5.elf installs the app (icon and libc.prx included), stays as the helper, repairs"
+echo "== 9. StellaPS5.elf installs the app (icon, libc.prx and licenses included), stays as the helper, repairs"
 T=$(newroot t9)
 APP=$T/homebrew/PPSA99927
 inst() { # dir -> runs the installer; it stays running as the helper when the port is free
@@ -237,6 +237,10 @@ expect "cmp -s $APP/sce_sys/icon0.png app/sce_sys/icon0.png" "icon0.png installe
 expect "cmp -s $APP/sce_sys/pic0.dds app/sce_sys/pic0.dds && cmp -s $APP/sce_sys/pic1.dds app/sce_sys/pic1.dds && cmp -s $APP/sce_sys/param.json app/sce_sys/param.json" "pic0.dds/pic1.dds (background) and param.json installed"
 expect "cmp -s $APP/eboot.bin tests/fake-eboot.bin" "eboot.bin installed"
 expect "cmp -s $APP/sce_module/libc.prx tests/fake-libc.prx" "sce_module/libc.prx installed"
+expect "cmp -s $APP/licenses/COPYING.txt ../COPYING && cmp -s $APP/licenses/LGPL-2.1.txt app/licenses/LGPL-2.1.txt && cmp -s $APP/licenses/NOTICES.txt app/licenses/NOTICES.txt" "licenses/ installed (COPYING.txt = the GPL 3, LGPL-2.1.txt, NOTICES.txt)"
+python3 tools/make_notices.py .. "$T/notices" >/dev/null
+expect "diff -r -q app/licenses $T/notices" "app/licenses/ is what tools/make_notices.py makes from the sources (make notices)"
+expect "grep -q 'Permission is hereby granted' app/licenses/NOTICES.txt && grep -q 'RAD Game Tools' app/licenses/NOTICES.txt && grep -q 'BupChip' app/licenses/NOTICES.txt" "NOTICES.txt carries miniz's MIT notice and BupChip's zlib notice"
 expect "grep -q 'Stella PS5 [0-9.]* installed. Open it from the Stella PS5 icon' $T/inst.txt" "install notification says to open the icon"
 expect "! ls $APP/*.part $APP/sce_sys/*.part $APP/sce_module/*.part 2>/dev/null | grep -q ." "no .part files left"
 inst "$T"
@@ -406,7 +410,10 @@ waitfor "$T/hroot/logs/helper.log" "listening" || sleep 1
 rc=$(run "$T" "$QUIT" "" "$T/root/roms/test.a26")
 expect "grep -q 'title PPSA99013 is not Stella PS5' $T/hroot/logs/helper.log" "the helper lets out no other title (not even NES FCEUmm PS5)"
 stop_helpers
+fi
 
+if want 16; then
+QUIT=$(QUITAT 30)
 echo "== 16. no helper running: the app hands its own helper to the ELF loader, then asks it"
 T=$(newroot t16)
 $ROM "$T/root/roms/test.a26" >/dev/null
@@ -1447,7 +1454,9 @@ $ROM "$T/root/roms/Atari5200/game.bin" 5200 >/dev/null
 rc=$(run "$T" "0:0;$(QUITAT 100)" "90" "$T/root/roms/Atari5200/game.bin")
 expect "[ $rc = 0 ] && grep -q 'as an Atari 5200 game (a5200)' $T/root/logs/boot.log && $CHECK $T/dump/flip00090.ppm 960 540 red >/dev/null" "a .bin in roms/Atari5200: a 5200 game"
 nosan "$T"
+fi
 
+if want 36; then
 echo "== 36. the Atari 7800 (ProSystem): the joystick, its buttons, the difficulty switches; an .a78 and a headerless .bin"
 T=$(newroot t36)
 $ROM "$T/root/roms/test.a78" >/dev/null
@@ -1467,7 +1476,9 @@ $ROM "$T/root/roms/Atari7800/game.bin" 7800bin >/dev/null
 rc=$(run "$T" "0:0;100:$CROSS;140:0;$(QUITAT 200)" "130" "$T/root/roms/Atari7800/game.bin")
 expect "[ $rc = 0 ] && grep -q 'as an Atari 7800 game (ProSystem)' $T/root/logs/boot.log && $CHECK $T/dump/flip00130.ppm 960 540 green >/dev/null" "a headerless .bin in roms/Atari7800: a 7800 game, runs"
 nosan "$T"
+fi
 
+if want 37; then
 echo "== 37. the Atari Lynx (Gearlynx): its boot ROM (said when missing), A and B, the screen rotation"
 T=$(newroot t37)
 $ROM "$T/root/roms/test.o" >/dev/null
@@ -1507,7 +1518,7 @@ SPORT=$((18000 + RANDOM % 1900))
 # the release: the installed app with a new eboot, a newer param.json, a new file; the old manifest lists a file that goes
 release() { # tag contentVersion [bad]
 	rm -rf "$T/rel" && mkdir -p "$T/rel" && cp -r "$T/homebrew/PPSA99927" "$T/rel/PPSA99927" && rm -f "$T/rel/PPSA99927/manifest.sha256" "$T/rel/PPSA99927/sce_sys/old.bin"
-	echo "eboot $1" >"$T/rel/PPSA99927/eboot.bin"; echo "new art" >"$T/rel/PPSA99927/sce_sys/icon0.png"; echo extra >"$T/rel/PPSA99927/sce_sys/extra.bin"
+	echo "eboot $1" >"$T/rel/PPSA99927/eboot.bin"; echo "new art" >"$T/rel/PPSA99927/sce_sys/icon0.png"; echo extra >"$T/rel/PPSA99927/sce_sys/extra.bin"; echo "notices $1" >>"$T/rel/PPSA99927/licenses/NOTICES.txt"
 	sed -i "s/\"contentVersion\": \"[0-9.]*\"/\"contentVersion\": \"$2\"/" "$T/rel/PPSA99927/sce_sys/param.json"
 	python3 tools/make_release_zip.py "$T/rel/PPSA99927" PPSA99927 "$SRV/StellaPS5-$1-PPSA99927.zip" >/dev/null
 	local sha size
@@ -1536,6 +1547,7 @@ expect "$UPD check 1.0 --until available,failed | grep -q '^available|9.9|'" "ch
 expect "$UPD install 1.0 --until done,failed | grep -q '^done|9.9|'" "downloaded, every file checked, installed"
 expect "grep -q 'eboot v9.9' $T/homebrew/PPSA99927/eboot.bin && grep -q '\"contentVersion\": \"99.000.000\"' $T/homebrew/PPSA99927/sce_sys/param.json" "the new eboot.bin and param.json in place"
 expect "[ -f $T/homebrew/PPSA99927/sce_sys/extra.bin ] && [ ! -e $T/homebrew/PPSA99927/sce_sys/old.bin ] && grep -q 'sce_sys/extra.bin' $T/homebrew/PPSA99927/manifest.sha256" "a new file added, one the old manifest had removed, the manifest kept"
+expect "tail -n1 $T/homebrew/PPSA99927/licenses/NOTICES.txt | grep -qx 'notices v9.9' && grep -q ' \\*licenses/COPYING.txt\$' $T/homebrew/PPSA99927/manifest.sha256" "the licenses/ folder in the release zip: updated and in the manifest"
 expect "grep -q 'new art' $T/appmeta/PPSA99927/icon0.png && [ -z \"\$(find $T/homebrew -name '*.new')\" ]" "the home screen's copy of the art refreshed; no .new files left"
 expect "$UPD status 9.9 | grep -q '^done|'" "the result stays until the app is opened again"
 stop38
@@ -1738,6 +1750,159 @@ mv "$T/mnt" "$T/mnt-away"
 rc=$(STELLAPS5_MNT=$T/mnt run "$T" "0:0;$(SHELFQUIT_AT 60)" "")
 expect "[ $rc = 0 ] && grep -q '\[games\] 1 ROM(s)' $T/root/logs/boot.log && grep -q 'usb0/stella/roms/Atari7800/Usb Game (USA).a78' $T/root/covers/crc-cache.txt" "the drive unplugged: one game, the drive's kept in the cache"
 nosan "$T"
+fi
+
+if want 42; then
+echo "== 42. files that aren't what they say: refused with a message, or run without hanging; ProSystem's BIOS; a5200's joystick ranges"
+# a. a 1-byte 2600 image (Stella's detection read past it) and 6 NOPs: refused, the screen says why
+for f in one:'\x00' nops:'\xea\xea\xea\xea\xea\xea'; do
+	n=${f%%:*}
+	T=$(newroot t42$n)
+	printf "${f#*:}" >"$T/root/roms/$n.a26"
+	rc=$(MAXFLIPS=200 run "$T" "0:0;60:$CROSS;62:0" "50" "$T/root/roms/$n.a26")
+	expect "grep -q \"could not start .*$n.a26: not a valid Atari 2600 game\" $T/root/logs/boot.log && [ -f $T/dump/flip00050.ppm ]" "$n.a26 ($(stat -c %s $T/root/roms/$n.a26) bytes): not a valid Atari 2600 game, the screen says so"
+	nosan "$T"
+done
+# b. a 129-byte program that doesn't end its frames (Stella's port looped for ever on it, waiting for one): the app
+# stays alive and the pause menu quits
+T=$(newroot t42hang)
+cp tests/odd/hang129.bin "$T/root/roms/hang.bin"
+rc=$(run "$T" "0:0;$(QUITAT 420)" "" "$T/root/roms/hang.bin")
+expect "[ $rc = 0 ] && grep -q 'running \"hang\" (Atari 2600)' $T/root/logs/boot.log && grep -q 'game closed' $T/root/logs/boot.log" "a program that doesn't end its frames: no hang, the pause menu quits (rc $rc)"
+nosan "$T"
+# c. .a78 headers ProSystem would read past the end of: Absolute ($0100) and Souper ($1000) with a 4 KiB body
+for ty in 01 10; do
+	T=$(newroot t42a78$ty)
+	python3 - "$T/root/roms/bad$ty.a78" $ty <<'PY'
+import sys
+h = bytearray(128); h[0] = 1; h[1:10] = b'ATARI7800'
+h[49:53] = (4096).to_bytes(4, 'big'); h[53] = int(sys.argv[2], 16); h[55] = h[56] = 1
+h[100:128] = b'ACTUAL CART DATA STARTS HERE'
+open(sys.argv[1], 'wb').write(bytes(h) + b'\xea' * 4096)
+PY
+	rc=$(MAXFLIPS=200 run "$T" "0:0;60:$CROSS;62:0" "50" "$T/root/roms/bad$ty.a78")
+	expect "grep -q 'could not start .*bad$ty.a78: not a valid Atari 7800 game' $T/root/logs/boot.log" "a .a78 of type \$${ty}00 with a 4 KiB body: refused"
+	nosan "$T"
+done
+# d. ProSystem's BIOS isn't used: with "7800 BIOS (U).rom" in bios/, an NTSC game, then a PAL one in the same session
+# (ProSystem kept its BIOS on: the PAL game showed nothing)
+T=$(newroot t42bios)
+mkdir -p "$T/root/bios" && head -c 4096 /dev/zero >"$T/root/bios/7800 BIOS (U).rom"
+$ROM "$T/root/roms/A Ntsc (USA).a78" >/dev/null
+$ROM "$T/root/roms/B Pal (Europe).a78" >/dev/null
+python3 -c "import sys; p=sys.argv[1]; d=bytearray(open(p,'rb').read()); d[57]=1; open(p,'wb').write(d)" "$T/root/roms/B Pal (Europe).a78"
+rc=$(run "$T" "0:0;40:$CROSS;42:0;$(SEQ 120 $L3R3 $UP $UP $CROSS);180:$RIGHT;182:0;200:$CROSS;202:0;$(QUITAT 300)" "280")
+expect "[ $rc = 0 ] && grep -q 'running \"B Pal (Europe)\" (Atari 7800), 50' $T/root/logs/boot.log && $CHECK $T/dump/flip00280.ppm 960 540 red >/dev/null" "the PAL game after the NTSC one runs (ProSystem gets a system folder of its own, with no BIOS)"
+nosan "$T"
+# e. a headerless 7800 game gets a header (ProSystem kept the last game's cartridge type without one)
+T=$(newroot t42noh)
+mkdir -p "$T/root/roms/Atari7800"
+$ROM "$T/root/roms/Atari7800/plain.bin" 7800bin >/dev/null
+rc=$(run "$T" "0:0;100:$CROSS;140:0;$(QUITAT 200)" "130" "$T/root/roms/Atari7800/plain.bin")
+expect "[ $rc = 0 ] && grep -q 'no .a78 header: one made (32768 bytes, a plain cartridge)' $T/root/logs/boot.log && $CHECK $T/dump/flip00130.ppm 960 540 green >/dev/null" "a headerless 7800 game: a header made, it runs"
+nosan "$T"
+# f. every core's options start at the core's own defaults: a5200's joystick ranges per game ("auto")
+T=$(newroot t42opt)
+$ROM "$T/root/roms/test.a52" >/dev/null
+rc=$(run "$T" "0:0;$(QUITAT 100)" "" "$T/root/roms/test.a52")
+expect "[ $rc = 0 ] && grep -q 'a5200 options: .*a5200_analog_sensitivity=auto' $T/root/logs/boot.log && grep -q 'a5200 options: .*a5200_digital_sensitivity=auto' $T/root/logs/boot.log" "a5200's joystick ranges: its per-game ones (auto), not 100 %"
+expect "grep -q 'a5200 options: .*a5200_analog_deadzone=15' $T/root/logs/boot.log" "an option the app doesn't set has a5200's own default (the deadzone: 15 %)"
+nosan "$T"
+fi
+
+if want 43; then
+echo "== 43. the biggest games: 512 KiB Lynx and 7800 cartridges with their headers, from a folder, a zip and a 7z"
+T=$(newroot t43)
+mkdir -p "$T/root/roms/AtariLynx" "$T/root/bios" && head -c 512 /dev/zero >"$T/root/bios/lynxboot.img"
+python3 - "$T/big.lnx" "$T/silver.a78" <<'PY'
+import sys
+h = bytearray(64); h[0:4] = b'LYNX'; h[4:6] = (2048).to_bytes(2, 'little'); h[8:10] = (1).to_bytes(2, 'little')
+h[10:20] = b'Big Lynx'.ljust(10, b'\0'); h[42:46] = b'Test'
+open(sys.argv[1], 'wb').write(bytes(h) + bytes(512 * 1024))
+a = bytearray(128); a[0] = 1; a[1:10] = b'ATARI7800'; a[49:53] = (512 * 1024).to_bytes(4, 'big'); a[54] = 0x02
+a[55] = a[56] = 1; a[100:128] = b'ACTUAL CART DATA STARTS HERE'
+open(sys.argv[2], 'wb').write(bytes(a) + bytes(512 * 1024))
+PY
+cp "$T/big.lnx" "$T/root/roms/AtariLynx/tennis.lnx"
+python3 tests/forge_crc.py "$T/root/roms/AtariLynx/tennis.lnx" $(crc_of lnx "Jimmy Connors' Tennis (USA, Europe)") 0x1040 64 >/dev/null
+python3 -c "import zipfile,sys; z=zipfile.ZipFile(sys.argv[1],'w',zipfile.ZIP_DEFLATED); z.write(sys.argv[2],'Big.lnx'); z.close()" "$T/root/roms/biglynx.zip" "$T/big.lnx"
+python3 -c "import py7zr,sys; z=py7zr.SevenZipFile(sys.argv[1],'w'); z.write(sys.argv[2],'Silver.a78'); z.close()" "$T/root/roms/silver.7z" "$T/silver.a78"
+rc=$(run "$T" "0:0;$(SHELFQUIT_AT 60)" "")
+expect "[ $rc = 0 ] && grep -q 'tennis.lnx \[lnx\] -> \"Jimmy Connors. Tennis (USA, Europe)\" (by CRC)' $T/root/logs/boot.log" "a 524,352-byte .lnx is read and named by its CRC"
+expect "grep -q 'biglynx.zip \[lnx\]' $T/root/logs/boot.log && grep -q 'silver.7z \[a78\]' $T/root/logs/boot.log" "the zipped .lnx and the 7-Zipped .a78 are listed"
+rc=$(MAXFLIPS=200 run "$T" "0:0" "" "$T/root/roms/biglynx.zip")
+expect "grep -q 'loading .*biglynx.zip -> Big.lnx (524352 bytes) as an Atari Lynx game' $T/root/logs/boot.log" "the zipped 512 KiB Lynx cartridge starts"
+nosan "$T"
+rc=$(MAXFLIPS=200 run "$T" "0:0" "" "$T/root/roms/silver.7z")
+expect "grep -q 'loading .*silver.7z -> Silver.a78 (524416 bytes) as an Atari 7800 game' $T/root/logs/boot.log" "the 7-Zipped 512 KiB 7800 cartridge starts"
+nosan "$T"
+fi
+
+if want 44; then
+echo "== 44. the install's journal (Media Player Classic PS5 1.5's): a failed rename puts the old version back, a cut-off install is put back when the helper starts, a damaged journal is left to the payload"
+stop44() { stop_helpers; pkill -f 'http.server 1[89][0-9][0-9][0-9]' 2>/dev/null; sleep 0.3; }
+stop44
+T=$(newroot t44)
+H=$T/homebrew/PPSA99927
+STELLAPS5_ROOT=$T/root STELLAPS5_HOMEBREW=$T/homebrew STELLAPS5_APPMETA=$T/appmeta ASAN_OPTIONS=detect_leaks=0 timeout 60 "$INSTALLER" >"$T/inst0.txt" 2>&1 &
+waitfor $T/root/logs/installer.log 'listening on 127.0.0.1'
+stop44
+SRV=$T/srv; mkdir -p $SRV
+SPORT=$((18000 + RANDOM % 1900))
+(cd "$SRV" && exec python3 -m http.server $SPORT --bind 127.0.0.1 >/dev/null 2>&1) &
+rm -rf $T/rel && mkdir -p $T/rel && cp -r $H $T/rel/PPSA99927 && rm -f $T/rel/PPSA99927/manifest.sha256
+echo "eboot v9.9" >$T/rel/PPSA99927/eboot.bin; echo extra >$T/rel/PPSA99927/sce_sys/extra.bin
+sed -i 's/"contentVersion": "[0-9.]*"/"contentVersion": "99.000.000"/' $T/rel/PPSA99927/sce_sys/param.json
+python3 tools/make_release_zip.py $T/rel/PPSA99927 PPSA99927 $SRV/StellaPS5-v9.9-PPSA99927.zip >/dev/null
+sha=$(sha256sum $SRV/StellaPS5-v9.9-PPSA99927.zip | cut -c1-64); size=$(stat -c %s $SRV/StellaPS5-v9.9-PPSA99927.zip)
+printf '{"tag_name":"v9.9","assets":[{"name":"StellaPS5-v9.9-PPSA99927.zip","size":%s,"digest":"sha256:%s","browser_download_url":"http://127.0.0.1:%s/StellaPS5-v9.9-PPSA99927.zip"}]}' $size $sha $SPORT >$SRV/latest.json
+sums() { ( cd $H && find . -type f | sort | xargs sha256sum ); }
+sums >$T/before.sums
+UPD="python3 tests/update_client.py $STELLAPS5_HELPER_PORT"
+helper44() { # the helper, with env ($@)
+	rm -f $T/root/logs/helper.log
+	env STELLAPS5_UPDATE_API=http://127.0.0.1:$SPORT/latest.json STELLAPS5_ROOT=$T/root STELLAPS5_HOMEBREW=$T/homebrew STELLAPS5_APPMETA=$T/appmeta "$@" ASAN_OPTIONS=detect_leaks=0 timeout 120 "$HELPER" >>"$T/helper.txt" 2>&1 &
+	sleep 0.3
+	waitfor $T/root/logs/helper.log 'listening on 127.0.0.1'
+}
+# a. a file that can't be put in place half way (param.json, after others): every old file put back
+helper44 STELLAPS5_HOST_UPDATE_FAIL_RENAME=sce_sys/param.json
+expect "$UPD check 1.0 --until available,failed | grep -q '^available|9.9|' && $UPD install 1.0 --until done,failed | grep -q \"^failed|.*Couldn't replace sce_sys/param.json .*the old version was put back\"" "a rename fails half way: the install says the old version was put back"
+expect "sums | cmp -s - $T/before.sums" "... and it was: every file as before (no .new, .old or journal left)"
+stop_helpers
+# b. an install cut off half way (the console turned off): put back when the helper next starts
+sha() { sha256sum <"$1" | head -c 1048576 | cut -c1-64; }
+python3 - $H <<'PY'
+import hashlib, os, sys
+h = sys.argv[1]
+def fsha(p):
+    return hashlib.sha256(open(p, 'rb').read()[:1 << 20]).hexdigest()
+os.rename(h + '/eboot.bin', h + '/eboot.bin.old.123-1')
+open(h + '/update.journal', 'w').write('stellaps5-update-journal 1 123-1\n1\t%s\teboot.bin\n0\t-\tsce_sys/added.bin\n1\t%s\tsce_sys/param.json\nend\n'
+    % (fsha(h + '/eboot.bin.old.123-1'), fsha(h + '/sce_sys/param.json')))
+open(h + '/eboot.bin', 'w').write('half-installed eboot\n')
+open(h + '/sce_sys/added.bin', 'w').write('a file the cut-off install added\n')
+open(h + '/sce_sys/param.json.new', 'w').write('new param\n')
+PY
+helper44
+expect "grep -q 'an install was cut off half way: the old version put back (3 file(s))' $T/root/logs/helper.log" "the next start: the interrupted install found"
+expect "sums | cmp -s - $T/before.sums" "... and the old version put back (the old eboot.bin, the added file gone, no journal)"
+# c. then the update installs, with no journal or old copies left
+expect "$UPD check 1.0 --until available,failed | grep -q '^available|9.9|' && $UPD install 1.0 --until done,failed | grep -q '^done|9.9|'" "then the update installs"
+expect "grep -q 'eboot v9.9' $H/eboot.bin && [ -f $H/sce_sys/extra.bin ] && [ -z \"\$(find $H -name '*.new' -o -name '*.old.*' -o -name 'update.journal*')\" ]" "... every file in place, nothing left behind"
+stop_helpers
+# d. a damaged journal (empty): nothing guessed, nothing installed, the payload repairs the app
+: >$H/update.journal
+echo "something" >$H/eboot.bin.old.9-9
+helper44
+expect "grep -q \"can't be read as a whole journal: left alone\" $T/root/logs/helper.log && grep -q 'its record is damaged' $T/helper.txt" "an empty journal: left alone, a notification says to send the payload"
+expect "$UPD check 1.0 --until available,failed | grep -q '^available|9.9|' && $UPD install 1.0 --until done,failed | grep -q \"^failed|.*An earlier update isn't finished\"" "... and no update installed over it"
+stop_helpers
+STELLAPS5_ROOT=$T/root STELLAPS5_HOMEBREW=$T/homebrew STELLAPS5_APPMETA=$T/appmeta ASAN_OPTIONS=detect_leaks=0 timeout 60 "$INSTALLER" >"$T/inst-repair.txt" 2>&1 &
+waitfor $T/inst-repair.txt 'listening on 127.0.0.1'
+expect "grep -q 'an update wasn.t finished; repairing the app' $T/inst-repair.txt && [ ! -e $H/update.journal ] && [ ! -e $H/eboot.bin.old.9-9 ] && cmp -s $H/eboot.bin tests/fake-eboot.bin" "the payload repairs it: its files back, the journal and the leftovers gone"
+expect "! grep -q 'runtime error\|AddressSanitizer' $T/helper.txt $T/inst-repair.txt" "no sanitizer reports"
+stop44
 fi
 
 echo

@@ -3,7 +3,7 @@
 // Frame pacing, as in Snes9x PS5:
 //   - 60 Hz games (NTSC): Present waits for the flip, so the console's vsync paces the emulation, and the resampler
 //     (the core's rate -> the output's 48 kHz) stretches the sound by up to 0.5% to keep about 60 ms queued.
-//   - other rates (PAL and SECAM games at 50 Hz, the Lynx at about 75 Hz): the audio clock paces instead (wait while
+//   - other rates (PAL and SECAM 2600 games at 50 Hz): the audio clock paces instead (wait while
 //     more than 60 ms is queued); the flips don't wait (each frame still waits, before writing, for the buffer it
 //     last flipped).
 //   - In any case, if more than 120 ms is queued (vsync not blocking for some reason), wait on audio.
@@ -44,6 +44,7 @@
 #include <ctime>
 #include <deque>
 #include <map>
+#include <set>
 #include <vector>
 
 namespace emu
@@ -260,7 +261,7 @@ constexpr size_t kRewindBytes = 192u * 1024 * 1024;
 // buttons once a frame or less)
 constexpr int kPressFrames = 8;
 // the biggest game a core takes: Stella's biggest cartridge is 512 KiB, a 7800 or Lynx game is up to 1 MiB (+ header)
-constexpr uint64_t kMaxRom = 2u * 1024 * 1024;
+constexpr uint64_t kMaxRom = fe::kMaxRomAny;
 // the Lynx boot ROM Gearlynx needs (/data/stella/bios/lynxboot.img), and its size
 constexpr const char* kLynxBios = "lynxboot.img";
 constexpr long kLynxBiosSize = 512;
@@ -375,6 +376,10 @@ struct State
 
 	// the cores' options, as libretro variables (each core's keys have its own prefix: one map for all)
 	std::map<std::string, std::string> opts;
+	std::set<std::string> opts_logged; // the cores whose options were logged
+	std::string prosystem_dir;         // ProSystem's system folder: one with no 7800 BIOS in it (see Environment)
+	int no_picture_runs = 0;           // Stella runs in a row without a picture (a file that isn't a 2600 game)
+	bool no_picture_said = false;
 	bool opts_changed = false;
 
 	// video
@@ -455,7 +460,11 @@ bool Environment(unsigned cmd, void* data)
 	switch (cmd)
 	{
 		case RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY:
-			*static_cast<const char**>(data) = g.sys_dir.c_str();
+			// ProSystem loads "7800 BIOS (U).rom" / "(E).rom" from its system folder and, once it has, keeps the BIOS
+			// on for every later game (its bios_enabled is never cleared: a PAL game after an NTSC one with only the
+			// (U) BIOS there shows nothing). The 7800 games start without it, and Stella PS5 doesn't use it: ProSystem
+			// gets a folder of its own, with no BIOS in it
+			*static_cast<const char**>(data) = g.system == fe::System::A7800 ? g.prosystem_dir.c_str() : g.sys_dir.c_str();
 			return true;
 		case RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY:
 			*static_cast<const char**>(data) = g.save_dir.c_str();
@@ -520,8 +529,25 @@ bool Environment(unsigned cmd, void* data)
 			}
 			return true;
 		}
-		// accepted and ignored
 		case RETRO_ENVIRONMENT_SET_VARIABLES:
+		{
+			// the core's options ("Description; default|other|..."): each one starts at the core's own default, so a
+			// core that falls back to something else when an option is missing (a5200's joystick sensitivity: 1.0
+			// instead of its per-game ranges) gets what it would in RetroArch; ApplySettings sets the ones we choose
+			for (const retro_variable* v = static_cast<const retro_variable*>(data); v && v->key; v++)
+			{
+				if (!v->value || g.opts.count(v->key))
+					continue;
+				const char* semi = strstr(v->value, "; ");
+				if (!semi)
+					continue;
+				std::string def = semi + 2;
+				def = def.substr(0, def.find('|'));
+				g.opts[v->key] = def;
+			}
+			return true;
+		}
+		// accepted and ignored
 		case RETRO_ENVIRONMENT_SET_INPUT_DESCRIPTORS:
 		case RETRO_ENVIRONMENT_SET_CONTROLLER_INFO:
 		case RETRO_ENVIRONMENT_SET_PERFORMANCE_LEVEL:
@@ -558,6 +584,7 @@ void Video(const void* data, unsigned w, unsigned h, size_t pitch)
 		return; // a duplicated frame: keep the last one
 	g.fw = int(w);
 	g.fh = int(h);
+	g.no_picture_runs = 0;
 	g.frame.resize(size_t(w) * h);
 	const uint8_t* src = static_cast<const uint8_t*>(data);
 	for (unsigned y = 0; y < h; y++)
@@ -936,6 +963,52 @@ void StartCore(fe::System s)
 		fe::Info(s).name, c.api_version(), info.valid_extensions ? info.valid_extensions : "");
 	g.core_inited[size_t(s)] = true;
 }
+// A file the core would read past the end of, or never make a picture of (found by fuzzing): what is wrong with it, in
+// English for the log, or "" when the core can take it.
+std::string RomProblem(fe::System s, const std::vector<uint8_t>& rom)
+{
+	char buf[160];
+	if (s == fe::System::A2600)
+	{
+		// Stella's detection compares the image with signatures of up to 8 bytes and reads its first 0x13 bytes: a
+		// smaller image runs it past the end (its search counts with size - signature, unsigned)
+		if (rom.size() < 32)
+		{
+			snprintf(buf, sizeof(buf), "%zu bytes, smaller than any Atari 2600 cartridge", rom.size());
+			return buf;
+		}
+		return "";
+	}
+	if (s == fe::System::A7800)
+	{
+		// ProSystem trusts the .a78 header's cartridge type: its banks are 16 KiB, read whole, and some types read a
+		// fixed size (Absolute: 64 KiB; Activision: 128 KiB; Souper: bank 31, 512 KiB); a plain cartridge sits below
+		// $10000 (64 KiB at most)
+		const bool header = rom.size() > 128 && memcmp(rom.data() + 1, "ATARI7800", 9) == 0;
+		const size_t body = header ? rom.size() - 128 : rom.size();
+		if (rom.size() <= 128)
+			return "too small for an Atari 7800 cartridge";
+		if (!header)
+			return body > 65536 && body % 16384 != 0 ? "no .a78 header, over 64 KiB and not in 16 KiB banks" : "";
+		const uint8_t* h = rom.data();
+		const uint32_t declared = uint32_t(h[49]) << 24 | uint32_t(h[50]) << 16 | uint32_t(h[51]) << 8 | h[52];
+		const unsigned hi = h[53], lo = h[54];
+		const bool banked = body % 16384 == 0;
+		if (hi == 1 && !(banked && body >= 65536))
+			return "an Absolute cartridge (header type $0100) needs 64 KiB in 16 KiB banks";
+		if (hi == 2 && !(banked && body >= 131072))
+			return "an Activision cartridge (header type $0200) needs 128 KiB in 16 KiB banks";
+		if (hi == 16 && !(banked && body >= 524288))
+			return "a Souper cartridge (header type $1000) needs 512 KiB in 16 KiB banks";
+		if (hi == 0 && (declared > 131072 || (lo & 0x1e)) && !banked)
+			return "a bank-switched cartridge (header type $0002-$001E, or over 128 KiB) needs 16 KiB banks";
+		if (hi == 0 && declared <= 131072 && !(lo & 0x1e) && body > 65536)
+			return "a plain cartridge can't be over 64 KiB";
+		return "";
+	}
+	return "";
+}
+
 } // namespace
 
 namespace emu
@@ -947,6 +1020,8 @@ bool InitCore()
 	STELLAPS5_STAGE(Emu, "init");
 	g.sys_dir = OrbisDir("bios");
 	g.save_dir = OrbisDir("saves");
+	g.prosystem_dir = OrbisRoot() + "/cores/prosystem"; // empty: no 7800 BIOS (Environment says why)
+	OrbisMkdirs(g.prosystem_dir);
 	ApplySettings();
 	OrbisLog("[emu] cores: Stella (Atari 2600), a5200 (Atari 5200), ProSystem (Atari 7800), Gearlynx (Atari Lynx); "
 			 "BIOS folder %s",
@@ -999,6 +1074,9 @@ void ApplySettings()
 	set("a5200_input_hack", kA52Hacks[s.a52_hack % kA52HackCount].value);
 	set("a5200_analog_device", "analog_stick");
 	set("a5200_pause_is_reset", "disabled");
+	// the joystick's range: a5200's per-game one (Missile Command 15 %, Pole Position 40 %...), as its default
+	set("a5200_digital_sensitivity", "auto");
+	set("a5200_analog_sensitivity", "auto");
 	// Atari 7800 (ProSystem)
 	set("prosystem_color_depth", "24bit");
 	set("prosystem_gamepad_dual_stick_hack", s.a78_dual_stick ? "enabled" : "disabled");
@@ -1075,6 +1153,34 @@ bool LoadGame(const std::string& path, std::string* error)
 							  "again."),
 			g.sys_dir.c_str()));
 	}
+	{
+		const std::string problem = RomProblem(g.system, g.rom);
+		if (!problem.empty())
+		{
+			OrbisLog("[emu] could not start %s: not a valid %s game (%s)", path.c_str(), fe::Info(g.system).name, problem.c_str());
+			return fail(Fmt(fe::T("%s is not a valid %s game."), file.c_str(), fe::T(fe::Info(g.system).name)));
+		}
+	}
+	// A 7800 game without its .a78 header gets one, made here: ProSystem sets the cartridge type (and the region,
+	// the controllers) from the header, and without one keeps the previous game's (a Souper cartridge's type for the
+	// next headerless game: a crash). Its database still sets the known games' own (it goes by the data's MD5, which
+	// the header doesn't change). Up to 64 KiB a plain cartridge; over it SuperGame banks (over 128 KiB the large kind)
+	if (g.system == fe::System::A7800 && !(g.rom.size() > 128 && memcmp(g.rom.data() + 1, "ATARI7800", 9) == 0))
+	{
+		std::vector<uint8_t> h(128, 0);
+		const uint32_t n = uint32_t(g.rom.size());
+		h[0] = 1;
+		memcpy(h.data() + 1, "ATARI7800", 9);
+		h[49] = uint8_t(n >> 24);
+		h[50] = uint8_t(n >> 16);
+		h[51] = uint8_t(n >> 8);
+		h[52] = uint8_t(n);
+		h[54] = n > 65536 ? 0x02 : 0x00;
+		h[55] = h[56] = 1; // joysticks
+		memcpy(h.data() + 100, "ACTUAL CART DATA STARTS HERE", 28);
+		g.rom.insert(g.rom.begin(), h.begin(), h.end());
+		OrbisLog("[emu] no .a78 header: one made (%u bytes, %s)", n, n > 65536 ? "SuperGame banks" : "a plain cartridge");
+	}
 	// Stella reads the game's name (its default title) and extension (a ".f8", ".e0"... extension names the
 	// bankswitching) from the path: a game in an archive goes by its name inside
 	g.core_path = inner.empty() ? g.path : g.dir + "/" + game_file;
@@ -1089,6 +1195,19 @@ bool LoadGame(const std::string& path, std::string* error)
 		inner.c_str(), g.rom.size(), fe::Info(g.system).name, g.core->name);
 	ApplySettings();
 	g.opts_changed = true;
+	{
+		// each core's options once a session, as it gets them (its defaults, and ours)
+		static const char* const kPrefix[] = {"stella_", "a5200_", "prosystem_", "gearlynx_"};
+		const char* prefix = kPrefix[size_t(g.system) % 4];
+		if (g.opts_logged.insert(prefix).second)
+		{
+			std::string line;
+			for (const auto& o : g.opts)
+				if (o.first.rfind(prefix, 0) == 0)
+					line += (line.empty() ? "" : ", ") + o.first + "=" + o.second;
+			OrbisLog("[emu] %s options: %s", g.core->name, line.c_str());
+		}
+	}
 	g.frame.clear();
 	g.fw = g.fh = 0;
 	g.in.clear();
@@ -1109,6 +1228,8 @@ bool LoadGame(const std::string& path, std::string* error)
 					: av.geometry.base_height ? double(av.geometry.base_width) / av.geometry.base_height
 											  : 4.0 / 3.0;
 	g.loaded = true;
+	g.no_picture_runs = 0;
+	g.no_picture_said = false;
 	g.wait_release = true;
 	g.prev_p1 = 0;
 	g.prev_flips = 0;
@@ -1534,6 +1655,14 @@ FrameResult RunFrame()
 		{
 			g.mute = g.turbo;
 			g.core->run();
+			// Stella giving no picture for 5 seconds: a program that never ends a frame (its port's loop is bounded,
+			// see src/os/libretro/StellaLIBRETRO.cxx): said once, the pause menu still works
+			if (g.system == fe::System::A2600 && ++g.no_picture_runs > 300 && !g.no_picture_said)
+			{
+				g.no_picture_said = true;
+				OrbisLog("[emu] no picture from %s for 300 frames: not a 2600 game?", g.name.c_str());
+				Osd(fe::T("This file shows no picture: it may not be an Atari 2600 game."), 8.0);
+			}
 			g.frames++;
 			g.fps_frames++;
 			for (int& f : g.press_frames)

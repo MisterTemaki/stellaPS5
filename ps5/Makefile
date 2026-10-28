@@ -246,13 +246,18 @@ $(PS5_OUT)/helper_data.o: coreorbis/orbis-shims/helper_data.cpp coreorbis/orbis-
 	$(PS5_CXX) -std=c++17 $(PS5_OPT) $(DEFS) $(INCS) $(PORT_WARN) -DHELPER_ELF='"$(abspath $(PS5_OUT)/StellaPS5-helper.elf)"' -c -o $@ $<
 
 # 3. the installer + helper, with the app folder built in
+# licenses/: the GPL (the app's licence), the LGPL 2.1 and NOTICES.txt (what is in the app, under which terms, and
+# the notices the permissive licences ask to keep), made by tools/make_notices.py (`make notices`) and committed
+LICENSE_FILES = COPYING.txt LGPL-2.1.txt NOTICES.txt
 APP_FILES = $(APP_OUT)/eboot.bin $(APP_OUT)/sce_sys/param.json $(APP_OUT)/sce_sys/icon0.png $(APP_OUT)/sce_sys/pic0.dds \
 	$(APP_OUT)/sce_sys/pic1.dds \
-	$(APP_OUT)/sce_module/libc.prx
+	$(APP_OUT)/sce_module/libc.prx $(addprefix $(APP_OUT)/licenses/,$(LICENSE_FILES))
 APP_DATA_DEFS = -DAPP_EBOOT='"$(abspath $(APP_OUT)/eboot.bin)"' -DAPP_PARAM='"$(abspath $(APP_OUT)/sce_sys/param.json)"' \
 	-DAPP_ICON0='"$(abspath $(APP_OUT)/sce_sys/icon0.png)"' -DAPP_PIC0='"$(abspath $(APP_OUT)/sce_sys/pic0.dds)"' \
 	-DAPP_PIC1='"$(abspath $(APP_OUT)/sce_sys/pic1.dds)"' \
-	-DAPP_LIBC='"$(abspath $(APP_OUT)/sce_module/libc.prx)"'
+	-DAPP_LIBC='"$(abspath $(APP_OUT)/sce_module/libc.prx)"' \
+	-DAPP_COPYING='"$(abspath $(APP_OUT)/licenses/COPYING.txt)"' -DAPP_LGPL='"$(abspath $(APP_OUT)/licenses/LGPL-2.1.txt)"' \
+	-DAPP_NOTICES='"$(abspath $(APP_OUT)/licenses/NOTICES.txt)"'
 
 $(PS5_OUT)/install_data.o: coreorbis/orbis-shims/install_data.cpp coreorbis/orbis-shims/ProsperoInstall.h $(APP_FILES)
 	$(PS5_CXX) -std=c++17 $(PS5_OPT) $(DEFS) $(INCS) $(PORT_WARN) $(APP_DATA_DEFS) -c -o $@ $<
@@ -266,7 +271,9 @@ $(PS5_OUT)/StellaPS5-stripped.elf: $(PS5_OUT)/StellaPS5.elf
 
 strip: $(PS5_OUT)/StellaPS5-stripped.elf
 
-# the release files, named with the version: build/dist/StellaPS5-v$(VERSION).elf and the sources zip
+# the release files, named with the version: build/dist/StellaPS5-v$(VERSION).elf and the sources zip (the committed
+# tree, HEAD: make it from the release's tagged commit; without Stella's test/ folder, whose bezel pictures carry a
+# game maker's logo and whose profiling ROMs are other people's games, neither ours to hand out)
 DIST := build/dist
 # + the app folder as a stored zip with its manifest (StellaPS5-v$(VERSION)-$(TITLE_ID).zip): attach it to the GitHub
 # release tagged v$(VERSION), so the app can update itself (Settings, SYSTEM, Updates)
@@ -274,9 +281,9 @@ dist: $(PS5_OUT)/StellaPS5.elf $(APP_FILES)
 	@mkdir -p $(DIST)
 	cp $< $(DIST)/StellaPS5-v$(VERSION).elf
 	python3 tools/make_release_zip.py $(APP_OUT) $(TITLE_ID) $(DIST)/StellaPS5-v$(VERSION)-$(TITLE_ID).zip
-	cd ../.. && rm -f $(abspath $(DIST))/stella-ps5-v$(VERSION)-src.zip && \
-		zip -qr $(abspath $(DIST))/stella-ps5-v$(VERSION)-src.zip $(notdir $(abspath ..)) \
-		-x '*/ps5/build/*' '*/proto/native/build/*' '*.o' '*/.git/*'
+	rm -f $(DIST)/stella-ps5-v$(VERSION)-src.zip
+	git -C .. archive --format=zip --prefix=stella-ps5-v$(VERSION)/ -o $(abspath $(DIST))/stella-ps5-v$(VERSION)-src.zip \
+		HEAD -- . ':(exclude)test'
 	@ls -l $(DIST)
 
 send: $(PS5_OUT)/StellaPS5.elf
@@ -355,6 +362,13 @@ $(APP_OUT)/eboot.bin: build/app/eboot.elf $(NATIVE_TOOL)
 $(APP_OUT)/sce_sys/param.json: app/sce_sys/param.json
 	@mkdir -p $(dir $@)
 	sed 's/PPSA99927/$(TITLE_ID)/g' $< > $@
+
+$(APP_OUT)/licenses/%.txt: app/licenses/%.txt
+	@mkdir -p $(dir $@)
+	cp $< $@
+
+notices:
+	python3 tools/make_notices.py .. app/licenses
 
 $(APP_OUT)/sce_sys/%.png: app/sce_sys/%.png
 	@mkdir -p $(dir $@)
@@ -446,10 +460,13 @@ $(HOST_OUT)/port/installer/helper_main.o: installer/installer_main.cpp coreorbis
 HOST_APP_DEFS = -DAPP_EBOOT='"$(abspath tests/fake-eboot.bin)"' -DAPP_PARAM='"$(abspath app/sce_sys/param.json)"' \
 	-DAPP_ICON0='"$(abspath app/sce_sys/icon0.png)"' -DAPP_PIC0='"$(abspath app/sce_sys/pic0.dds)"' \
 	-DAPP_PIC1='"$(abspath app/sce_sys/pic1.dds)"' \
-	-DAPP_LIBC='"$(abspath tests/fake-libc.prx)"'
+	-DAPP_LIBC='"$(abspath tests/fake-libc.prx)"' \
+	-DAPP_COPYING='"$(abspath app/licenses/COPYING.txt)"' -DAPP_LGPL='"$(abspath app/licenses/LGPL-2.1.txt)"' \
+	-DAPP_NOTICES='"$(abspath app/licenses/NOTICES.txt)"'
 
 $(HOST_OUT)/install_data.o: coreorbis/orbis-shims/install_data.cpp coreorbis/orbis-shims/ProsperoInstall.h \
-		tests/fake-eboot.bin tests/fake-libc.prx app/sce_sys/param.json app/sce_sys/icon0.png app/sce_sys/pic0.dds app/sce_sys/pic1.dds
+		tests/fake-eboot.bin tests/fake-libc.prx app/sce_sys/param.json app/sce_sys/icon0.png app/sce_sys/pic0.dds app/sce_sys/pic1.dds \
+		$(addprefix app/licenses/,$(LICENSE_FILES))
 	@mkdir -p $(dir $@)
 	$(HOST_CXX) -std=c++17 $(HOST_OPT) $(DEFS) $(INCS) $(PORT_WARN) $(HOST_APP_DEFS) -c -o $@ $<
 
@@ -542,5 +559,5 @@ clean:
 # the SMB backend against a real Samba (adds `smb-test`, run before the other tests; skipped without smbd)
 include tests/smb/smb.mk
 
-.PHONY: ps5 ps5-core host-core host test test-nfs test-nfs-server test-tabs test-7z send strip app dist clean
+.PHONY: ps5 ps5-core host-core host test test-nfs test-nfs-server test-tabs test-7z send strip app dist clean notices
 .SECONDARY:

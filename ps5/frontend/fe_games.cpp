@@ -624,8 +624,6 @@ bool IsArchiveExt(const std::string& ext)
 
 namespace
 {
-// The biggest game accepted from an archive: Stella's biggest cartridge (Cartridge::maxSize())
-constexpr uint64_t kMaxArchivedRom = 512u * 1024;
 
 // A file of an archive that is a game we list: an Atari 2600 game (.a26, .bin, .rom).
 bool IsArchivedRom(const std::string& name, System* sys = nullptr)
@@ -657,7 +655,7 @@ const char* SevenZipWhy(sevenzip::Status st)
 			return "It is packed with a method Stella PS5 can't unpack (LZMA, LZMA2 and PPMd work), or its names are encrypted.";
 		case sevenzip::Status::Encrypted: return "The archive is encrypted.";
 		case sevenzip::Status::TooBig:
-			return "The game, or the solid block it is packed in, is too big (512 KiB for a game, 64 MiB for a block).";
+			return "The game, or the solid block it is packed in, is too big (2 MiB for a game, 64 MiB for a block).";
 		case sevenzip::Status::ReadError: return "The file could not be read.";
 		case sevenzip::Status::NoMemory: return "There is not enough memory to unpack it.";
 		default: return "The archive is damaged, or it is not a 7z archive.";
@@ -721,7 +719,7 @@ bool ReadFromArchive(const std::string& path, std::string* inner, std::vector<ui
 				return false; // no game inside: the caller says so
 			}
 			*inner = a.Entries()[size_t(i)].name;
-			st = a.Extract(size_t(i), data, kMaxArchivedRom);
+			st = a.Extract(size_t(i), data, MaxRomSizeFor(*inner));
 			if (st == sevenzip::Status::Ok && data->empty())
 				st = sevenzip::Status::Broken;
 		}
@@ -755,7 +753,7 @@ bool ReadFromArchive(const std::string& path, std::string* inner, std::vector<ui
 	{
 		unz_file_info info;
 		ok = unzGetCurrentFileInfo(z, &info, nullptr, 0, nullptr, 0, nullptr, 0) == UNZ_OK &&
-			 info.uncompressed_size > 0 && info.uncompressed_size <= kMaxArchivedRom && unzOpenCurrentFile(z) == UNZ_OK;
+			 info.uncompressed_size > 0 && info.uncompressed_size <= MaxRomSizeFor(*inner) && unzOpenCurrentFile(z) == UNZ_OK;
 		if (ok)
 		{
 			data->resize(info.uncompressed_size);
@@ -863,7 +861,7 @@ bool RomCrc32(const std::string& path, uint32_t* whole, uint32_t* body, std::str
 		fseek(f, 0, SEEK_END);
 		const long size = ftell(f);
 		fseek(f, 0, SEEK_SET);
-		if (size <= 0 || size > long(kMaxArchivedRom))
+		if (size <= 0 || uint64_t(size) > MaxRomSizeFor(path))
 		{
 			fclose(f);
 			return false;
@@ -890,6 +888,25 @@ bool RomCrc32(const std::string& path, uint32_t* whole, uint32_t* body, std::str
 	if (md5)
 		*md5 = vcs::Md5(data.data(), data.size());
 	return true;
+}
+
+uint64_t MaxRomSize(System s)
+{
+	switch (s)
+	{
+		case System::A2600: return 512u * 1024;
+		case System::A5200: return 128u * 1024;
+		default: return 2u * 1024 * 1024 + 1024;
+	}
+}
+
+uint64_t MaxRomSizeFor(const std::string& name)
+{
+	System s;
+	bool ambiguous = false;
+	if (!SystemForExt(ExtOf(name), &s, &ambiguous) || ambiguous)
+		return kMaxRomAny;
+	return MaxRomSize(s);
 }
 
 System SystemOfRom(const std::string& path, const std::string& name, const std::vector<uint8_t>& data)

@@ -86,7 +86,8 @@ std::vector<std::string> Wrap(const std::string& text, int scale, int max_px, si
 void DrawNote(const std::string& text, uint32_t color)
 {
 	int y = H - 150;
-	for (const std::string& l : Wrap(text, 3, W - 160, 2))
+	// netfs's messages (the form's checks, the test's result, why a share is down) in the chosen language
+	for (const std::string& l : Wrap(TNet(text), 3, W - 160, 2))
 	{
 		DrawText(80, y, l.c_str(), 3, color, false);
 		y += 36;

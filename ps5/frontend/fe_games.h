@@ -87,6 +87,15 @@ struct GameInfo
 // for a .bin or .rom, the folders of path, else the game tables (data: the ROM, by its CRC), else the 2600.
 System SystemOfRom(const std::string& path, const std::string& name, const std::vector<uint8_t>& data);
 
+// The biggest game file of each system the app takes (from a folder, a .zip or a .7z), header included, with room to
+// spare: the 2600 Stella's biggest cartridge (512 KiB, Cartridge::maxSize()), the 5200 128 KiB (its carts are 40 KiB
+// at most), the 7800 and the Lynx 2 MiB (512 KiB carts are 524,416 bytes as .a78, 524,352 as .lnx). kMaxRomAny: the
+// biggest of them, for a .bin or .rom whose system isn't known yet.
+uint64_t MaxRomSize(System s);
+constexpr uint64_t kMaxRomAny = 2u * 1024 * 1024 + 1024;
+// The limit for a file of this name (its extension's system; kMaxRomAny when the extension is shared)
+uint64_t MaxRomSizeFor(const std::string& name);
+
 // The table built into the app.
 namespace gamedb
 {

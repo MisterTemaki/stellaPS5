@@ -267,6 +267,18 @@ void InitUpdater()
 		ProsperoNotifyFlush();
 	});
 	RefreshPlace(true);
+	// an update cut off half way (the console turned off while its files went into place): put back now
+	const AppPlace p = FindAppPlace(STELLAPS5_TITLE_ID, EnvOr("STELLAPS5_HOMEBREW", "/data/homebrew") + "/" STELLAPS5_TITLE_ID);
+	if (p.writable)
+	{
+		update::RecoverInterrupted(p.dir);
+		const std::string problem = update::StartupProblem();
+		if (!problem.empty())
+		{
+			ProsperoNotify("Stella PS5: %s", problem.c_str());
+			ProsperoNotifyFlush();
+		}
+	}
 }
 
 // One updater request from the app: "status", "check", "autocheck", "install", "ack". The answer: the status.

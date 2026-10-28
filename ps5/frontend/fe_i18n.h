@@ -7,6 +7,8 @@
 // SPDX-License-Identifier: MIT
 #pragma once
 
+#include <string>
+
 namespace fe
 {
 enum class Language : int
@@ -23,4 +25,8 @@ enum class Language : int
 const char* LanguageName(int lang);
 // The text in the current language (Config().language).
 const char* T(const char* english);
+// A network share's message (netfs's texts: "192.168.1.5 did not answer. ...", "The share games is not on nas.",
+// the connection test's result...), which carry names: translated by its template (kNetTable), the names kept.
+// A text it doesn't know (or already translated) comes back as it is.
+std::string TNet(const std::string& text);
 } // namespace fe

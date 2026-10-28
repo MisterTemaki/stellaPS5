@@ -17,6 +17,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <map>
 #include <mutex>
 #include <set>
@@ -612,11 +613,236 @@ bool ParseRelease(const std::string& json, const std::string& title_id, Release&
 	return false;
 }
 
+// (From Media Player Classic PS5 1.5's updater.)
+// The install's journal (see InstallZip, step 3) and what puts an interrupted install back.
+//
+// update.journal is written whole (a temporary file, synced, renamed) before any app file moves:
+//   stellaps5-update-journal 1 <transaction>
+//   1<TAB><sha-256>TAB>eboot.bin   a file that replaced one (kept as <name>.old.<transaction>), the old one's SHA-256
+//   0<TAB>-<TAB>sce_sys/extra.bin  a file the install adds
+//   end
+// A journal that doesn't read like that (empty, cut short, damaged) isn't guessed at: it stays, nothing is
+// installed while it is there, and the app says to send the payload, which rewrites every file.
+static const char* const kJournal = "update.journal";
+static const char* const kJournalHead = "stellaps5-update-journal 1 ";
+
+static bool Exists(const std::string& path)
+{
+	struct stat st;
+	return lstat(path.c_str(), &st) == 0;
+}
+
+// host tests: STELLAPS5_HOST_UPDATE_FAIL_<WHAT>=<file> makes that step fail for that file (errno EIO)
+static bool FailForTest(const char* what, const std::string& rel)
+{
+#ifndef __PROSPERO__
+	const char* f = getenv((std::string("STELLAPS5_HOST_UPDATE_FAIL_") + what).c_str());
+	if (f && rel == f)
+	{
+		errno = EIO;
+		return true;
+	}
+#else
+	(void)what;
+	(void)rel;
+#endif
+	return false;
+}
+
+static bool SyncDir(const std::string& dir)
+{
+	if (FailForTest("SYNC", dir.substr(dir.rfind('/') + 1)))
+		return false;
+	const int fd = open(dir.c_str(), O_RDONLY);
+	if (fd < 0)
+		return false;
+	const bool ok = fsync(fd) == 0;
+	close(fd);
+	return ok;
+}
+
+struct JournalEntry
+{
+	std::string rel;
+	bool had = false;
+	std::string old_sha; // the replaced file's SHA-256: tells "already put back" from "lost" when its copy is gone
+};
+
+static std::string FileSha(const std::string& path)
+{
+	const std::string t = ReadText(path);
+	return Sha256Hex(reinterpret_cast<const uint8_t*>(t.data()), t.size());
+}
+
+struct Journal
+{
+	std::string tx;
+	std::vector<JournalEntry> entries;
+	std::string Old(const std::string& app_dir, const std::string& rel) const { return app_dir + "/" + rel + ".old." + tx; }
+};
+
+static std::string JournalText(const Journal& j)
+{
+	std::string t = kJournalHead + j.tx + "\n";
+	for (const JournalEntry& e : j.entries)
+		t += std::string(e.had ? "1\t" + e.old_sha : "0\t-") + "\t" + e.rel + "\n";
+	return t + "end\n";
+}
+
+// The journal read back; false when it isn't a whole, well-formed one.
+static bool ParseJournal(const std::string& text, Journal& j)
+{
+	j = Journal{};
+	const size_t nl = text.find('\n');
+	if (nl == std::string::npos || text.compare(0, strlen(kJournalHead), kJournalHead) != 0)
+		return false;
+	j.tx = text.substr(strlen(kJournalHead), nl - strlen(kJournalHead));
+	if (j.tx.empty() || j.tx.size() > 32 || j.tx.find_first_not_of("0123456789-") != std::string::npos)
+		return false;
+	size_t pos = nl + 1;
+	bool ended = false;
+	while (pos < text.size())
+	{
+		size_t e = text.find('\n', pos);
+		if (e == std::string::npos)
+			return false; // cut short
+		const std::string line = text.substr(pos, e - pos);
+		pos = e + 1;
+		if (ended)
+			return false; // something after "end"
+		if (line == "end")
+		{
+			ended = true;
+			continue;
+		}
+		const size_t tab2 = line.find('\t', 2);
+		if (line.size() < 5 || line[1] != '\t' || (line[0] != '0' && line[0] != '1') || tab2 == std::string::npos)
+			return false;
+		JournalEntry je{line.substr(tab2 + 1), line[0] == '1', line.substr(2, tab2 - 2)};
+		const bool sha_ok = je.had ? je.old_sha.size() == 64 &&
+										 je.old_sha.find_first_not_of("0123456789abcdef") == std::string::npos
+								   : je.old_sha == "-";
+		if (!SafeRel(je.rel) || !sha_ok)
+			return false;
+		j.entries.push_back(je);
+	}
+	return ended && !j.entries.empty();
+}
+
+// Written whole: a temporary file (synced), renamed over the journal, the folder synced.
+static bool WriteJournal(const std::string& app_dir, const Journal& j)
+{
+	const std::string path = app_dir + "/" + kJournal, tmp = path + ".tmp";
+	const std::string t = JournalText(j);
+	if (FailForTest("JOURNAL", kJournal) || !WriteFile(tmp, reinterpret_cast<const uint8_t*>(t.data()), t.size()) ||
+		rename(tmp.c_str(), path.c_str()) != 0)
+	{
+		unlink(tmp.c_str());
+		return false;
+	}
+	return SyncDir(app_dir);
+}
+
+// Every folder a file of the journal is in (the app folder, sce_sys...), synced so the renames are on the disk.
+static bool SyncDirsOf(const std::string& app_dir, const Journal& j)
+{
+	std::set<std::string> dirs = {app_dir};
+	for (const JournalEntry& e : j.entries)
+	{
+		const size_t slash = e.rel.rfind('/');
+		if (slash != std::string::npos)
+			dirs.insert(app_dir + "/" + e.rel.substr(0, slash));
+	}
+	bool ok = true;
+	for (const std::string& d : dirs)
+		if (!SyncDir(d))
+		{
+			OrbisLog("[update] couldn't sync %s to the disk (errno %d)", d.c_str(), errno);
+			ok = false;
+		}
+	return ok;
+}
+
+// Puts the old version back for the journal's files: each old copy renamed back over the new file, a file the
+// install added removed, a <name>.new not yet moved deleted. Returns the entries that could NOT be put back and can
+// be tried again (their old copy is still there); `lost` gets the files whose old copy is gone.
+static std::vector<JournalEntry> PutBack(const std::string& app_dir, const Journal& j, std::vector<std::string>* lost)
+{
+	std::vector<JournalEntry> left;
+	for (auto it = j.entries.rbegin(); it != j.entries.rend(); ++it)
+	{
+		const std::string f = app_dir + "/" + it->rel;
+		const std::string old = j.Old(app_dir, it->rel);
+		const bool moved = !Exists(f + ".new"); // still beside it: never put in place, the old file untouched
+		if (it->had)
+		{
+			if (Exists(old))
+			{
+				if (FailForTest("RESTORE", it->rel) || rename(old.c_str(), f.c_str()) != 0)
+				{
+					OrbisLog("[update] couldn't put back the old %s (errno %d)", it->rel.c_str(), errno);
+					left.push_back(*it);
+					continue;
+				}
+			}
+			else if (moved && FileSha(f) != it->old_sha && lost)
+				lost->push_back(it->rel); // not the old file, and its old copy is gone (else: already put back)
+		}
+		else if (moved && Exists(f) && unlink(f.c_str()) != 0)
+		{
+			OrbisLog("[update] couldn't remove %s (errno %d)", it->rel.c_str(), errno);
+			left.push_back(*it);
+			continue;
+		}
+		unlink((f + ".new").c_str());
+	}
+	std::reverse(left.begin(), left.end());
+	return left;
+}
+
+// After PutBack: the journal goes only when everything is back and on the disk; else it keeps what is left.
+static bool SettleJournal(const std::string& app_dir, const Journal& j, const std::vector<JournalEntry>& left)
+{
+	const bool synced = SyncDirsOf(app_dir, j);
+	if (left.empty() && synced)
+	{
+		const std::string journal = app_dir + "/" + kJournal;
+		if (unlink(journal.c_str()) == 0 && SyncDir(app_dir))
+			return true;
+		OrbisLog("[update] couldn't remove %s", journal.c_str());
+		return false;
+	}
+	if (!left.empty())
+	{
+		Journal rest = j;
+		rest.entries = left;
+		if (!WriteJournal(app_dir, rest))
+			OrbisLog("[update] couldn't rewrite the journal: it keeps every file");
+	}
+	return false;
+}
+
+static std::string NewTransaction()
+{
+	timespec ts = {};
+	clock_gettime(CLOCK_REALTIME, &ts);
+	return std::to_string((long long)ts.tv_sec) + "-" + std::to_string((long long)getpid());
+}
+
 std::string InstallZip(const std::vector<uint8_t>& zip, const std::string& expect_sha256, const Config& c,
 	std::atomic<size_t>* files_done, std::atomic<size_t>* files_total)
 {
 	if (!c.cant_install.empty())
 		return c.cant_install; // an image, a read-only folder...: nothing is written there
+	// an earlier install that isn't put back yet: its old copies are the only way back, so nothing is installed
+	// over it (RecoverInterrupted runs first; if the journal is still there, it couldn't finish)
+	if (Exists(c.app_dir + "/" + kJournal))
+	{
+		RecoverInterrupted(c.app_dir);
+		if (Exists(c.app_dir + "/" + kJournal))
+			return "An earlier update isn't finished being put back: nothing was installed. Send the payload again to "
+				   "repair the app, then try again.";
+	}
 	if (!expect_sha256.empty())
 	{
 		const std::string got = Sha256Hex(zip.data(), zip.size());
@@ -693,11 +919,57 @@ std::string InstallZip(const std::vector<uint8_t>& zip, const std::string& expec
 	written.push_back("manifest.sha256");
 	// 2. the old manifest, for the files that are gone
 	const auto old_manifest = ParseManifest(ReadText(c.app_dir + "/manifest.sha256"));
-	// 3. renamed over the old ones, eboot.bin then the manifest last
+	// 3. into place, eboot.bin then the manifest last, each old file kept as <name>.old.<transaction> until every new
+	// one is in and on the disk. update.journal lists the files while this goes on: a rename that fails puts the old
+	// ones back, and an install cut off half way (the console turned off) is put back when the app next starts.
+	Journal jr;
+	jr.tx = NewTransaction();
 	for (const std::string& rel : written)
-		if (rename((c.app_dir + "/" + rel + ".new").c_str(), (c.app_dir + "/" + rel).c_str()) != 0)
-			return "Couldn't replace " + rel + " (errno " + std::to_string(errno) +
-				   "): the app may be half updated; send the payload to repair it.";
+	{
+		const std::string f = c.app_dir + "/" + rel;
+		const bool had = Exists(f);
+		jr.entries.push_back({rel, had, had ? FileSha(f) : "-"});
+	}
+	if (!WriteJournal(c.app_dir, jr))
+	{
+		unlink((c.app_dir + "/" + kJournal).c_str());
+		undo();
+		return "Couldn't write the update's journal (disk full?): nothing was changed.";
+	}
+	std::vector<std::pair<std::string, bool>> moved; // the files in place, and whether they replaced one
+	auto give_back = [&](const std::string& head) {
+		std::vector<std::string> lost;
+		const std::vector<JournalEntry> left = PutBack(c.app_dir, jr, &lost);
+		const bool all = SettleJournal(c.app_dir, jr, left) && lost.empty();
+		if (all)
+			return head + "the old version was put back.";
+		if (left.empty() && lost.empty())
+			return head + "the old version was put back, but the disk didn't confirm it; it is checked again when the "
+						  "app starts.";
+		OrbisLog("[update] %zu file(s) not put back, %zu without their old copy", left.size(), lost.size());
+		return head + "the old version couldn't be put back completely (" + std::to_string(left.size() + lost.size()) +
+			   " file(s)); it is tried again when the app starts. If the app doesn't open, send the payload again "
+			   "to repair it.";
+	};
+	for (const std::string& rel : written)
+	{
+		const std::string f = c.app_dir + "/" + rel;
+		const bool had = Exists(f);
+		if ((had && rename(f.c_str(), jr.Old(c.app_dir, rel).c_str()) != 0) || FailForTest("RENAME", rel) ||
+			rename((f + ".new").c_str(), f.c_str()) != 0)
+			return give_back("Couldn't replace " + rel + " (errno " + std::to_string(errno) + "): ");
+		moved.push_back({rel, had});
+		if (files_done)
+			(*files_done)++;
+	}
+	// all in: on the disk first (else everything goes back), then the journal goes, then the old copies
+	if (!SyncDirsOf(c.app_dir, jr))
+		return give_back("The new files couldn't be written to the disk for sure: ");
+	if (unlink((c.app_dir + "/" + kJournal).c_str()) != 0 || !SyncDir(c.app_dir))
+		OrbisLog("[update] the journal couldn't be removed: the next start will check the files again");
+	for (const auto& m : moved)
+		if (m.second)
+			unlink(jr.Old(c.app_dir, m.first).c_str());
 	for (const auto& kv : old_manifest)
 		if (!manifest.count(kv.first) && kv.first != "manifest.sha256")
 		{
@@ -715,6 +987,50 @@ std::string InstallZip(const std::vector<uint8_t>& zip, const std::string& expec
 					OrbisLog("[update] couldn't refresh %s/%s", c.appmeta_dir.c_str(), kv.first.substr(8).c_str());
 			}
 	return "";
+}
+
+namespace
+{
+std::string g_startup_problem;
+}
+
+int RecoverInterrupted(const std::string& app_dir)
+{
+	const std::string journal = app_dir + "/" + kJournal;
+	if (!Exists(journal))
+		return 0;
+	Journal j;
+	if (!ParseJournal(ReadText(journal), j))
+	{
+		// not a whole journal: which files moved can't be told, so nothing is touched and the journal stays
+		OrbisLog("[update] %s is there but can't be read as a whole journal: left alone; the payload repairs the app",
+			journal.c_str());
+		g_startup_problem = "An update was cut off and its record is damaged, so the app can't put itself back. "
+							"Send the payload again to repair it.";
+		return 0;
+	}
+	std::vector<std::string> lost;
+	const std::vector<JournalEntry> left = PutBack(app_dir, j, &lost);
+	const bool all = SettleJournal(app_dir, j, left);
+	const int back = int(j.entries.size() - left.size() - lost.size());
+	for (const std::string& rel : lost)
+		OrbisLog("[update] %s: its old copy is gone, it can't be put back", rel.c_str());
+	if (all && lost.empty())
+		OrbisLog("[update] an install was cut off half way: the old version put back (%d file(s))", back);
+	else
+	{
+		OrbisLog("[update] an install was cut off half way: %d file(s) put back, %zu not (journal %s), %zu without their "
+				 "old copy",
+			back, left.size(), all ? "removed" : "kept for the next start", lost.size());
+		g_startup_problem = "An update was cut off and the app couldn't be fully put back as it was. If something "
+							"doesn't work, send the payload again to repair it.";
+	}
+	return back;
+}
+
+std::string StartupProblem()
+{
+	return g_startup_problem;
 }
 
 // ---- the worker's face -------------------------------------------------------------------------------------------

@@ -84,12 +84,17 @@ class SoundLIBRETRO : public Sound
       @param stream   Output audio buffer
       @param samples  Number of audio samples read
     */
-    void dequeue(Int16* stream, uInt32* samples)
+    void dequeue(Int16* stream, uInt32* samples, uInt32 max_out = 0)
     {
       uInt32 outIndex = 0;
 
       while (myAudioQueue->size())
       {
+        // Stella PS5: no more than the stream holds (max_out values; 0: no limit, as before). A call that ran
+        // several frames' worth of scanlines (StellaLIBRETRO::updateVideo) wrote past the end of it
+        if (max_out && outIndex + 2 * myAudioQueue->fragmentSize() > max_out)
+          break;
+
         Int16* nextFragment = myAudioQueue->dequeue(myCurrentFragment);
 
         if (!nextFragment)

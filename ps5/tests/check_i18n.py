@@ -34,5 +34,15 @@ for e in entries:
         if spec.findall(t) != want:
             print("%s: specifiers %s, English has %s: %s" % (lang, spec.findall(t), want, e[0]))
             bad += 1
-print("%d texts, %d problem(s)" % (len(entries), bad))
+# netfs's message templates (kNetTable): five languages, the same number of {} (the names) in each
+nb = src[src.index("const Entry kNetTable[] = {"):src.index("};", src.index("const Entry kNetTable[] = {"))]
+nets = 0
+for m in re.finditer(r"\{\s*((?:%s\s*,?\s*)+)\}" % lit, nb):
+    parts = re.findall(r'((?:"(?:[^"\\]|\\.)*"\s*)+)(?:,|$)', m.group(1))
+    strs = ["".join(re.findall(lit, p)) for p in parts]
+    nets += 1
+    if len(strs) != 5 or len({s.count("{}") for s in strs}) != 1:
+        print("net template:", strs)
+        bad += 1
+print("%d texts, %d network templates, %d problem(s)" % (len(entries), nets, bad))
 sys.exit(1 if bad else 0)

@@ -153,7 +153,8 @@ struct Row
 	bool header = false;
 };
 
-void DrawOptionBox(const std::string& title, const std::vector<Row>& rows, int sel, bool over_game)
+// The box, centred in the screen less `room_below` (the settings' help lines go there); returns its bottom edge
+int DrawOptionBox(const std::string& title, const std::vector<Row>& rows, int sel, bool over_game, int room_below = 0)
 {
 	const int scale = 3;
 	const int row_h = 46;
@@ -161,7 +162,7 @@ void DrawOptionBox(const std::string& title, const std::vector<Row>& rows, int s
 	const int bw = 1180;
 	const int bh = 120 + visible * row_h + 30;
 	const int bx = (W - bw) / 2;
-	const int by = std::max(20, (H - bh) / 2);
+	const int by = std::max(20, (H - bh - room_below) / 2);
 	int top = 0;
 	if (int(rows.size()) > visible)
 		top = std::max(0, std::min(int(rows.size()) - visible, sel - visible / 2));
@@ -198,6 +199,7 @@ void DrawOptionBox(const std::string& title, const std::vector<Row>& rows, int s
 		const int ty = by + 104 + (track - thumb) * top / std::max(1, int(rows.size()) - visible);
 		ps5video::FillRect(bx + bw - 12, ty, 6, thumb, kAccent);
 	}
+	return by + bh + 4;
 }
 
 int Step(int sel, int dir, const std::vector<Row>& rows)
@@ -643,6 +645,24 @@ void Background(bool over_game)
 		Header("Settings");
 }
 
+std::vector<std::string> Wrap(const std::string& text, int scale, int max_px);
+constexpr int kHelpLineH = 30;
+// A help text in at most two lines from y (the second one cut short with "..." if it must)
+void DrawHelpLines(const std::string& text, int y, uint32_t color)
+{
+	std::vector<std::string> lines = Wrap(text, 2, W - 160);
+	if (lines.size() > 2)
+	{
+		std::string rest = lines[1];
+		for (size_t i = 2; i < lines.size(); i++)
+			rest += " " + lines[i];
+		lines.resize(2);
+		lines[1] = FitText(rest, 2, W - 160);
+	}
+	for (size_t i = 0; i < lines.size(); i++)
+		DrawText(80, y + int(i) * kHelpLineH, lines[i].c_str(), 2, color);
+}
+
 void SettingsScreen(bool over_game)
 {
 	NavReader nav;
@@ -658,17 +678,23 @@ void SettingsScreen(bool over_game)
 		sel = std::min(sel, int(ids.size()) - 1);
 		const int id = ids[size_t(sel)];
 		Background(over_game);
-		DrawOptionBox("Settings", rows, sel, over_game);
+		// the help line(s) of the row go under the box (up to two lines, wrapped), above the footer (80 pixels): the
+		// box leaves them the room
+		const int bottom = DrawOptionBox("Settings", rows, sel, over_game, 80 + 2 * kHelpLineH + 16);
 		if (!over_game)
 			Footer(std::string(icon::Cross) + " " + T("Change") + "     " + icon::DpadLeftRight + " " + T("Adjust") + "     " + icon::Circle + " " + T("Back"));
+		const char* help = nullptr;
+		uint32_t help_color = kDim;
 		if (id == S_UPDATES && g_upd.st.phase == update::Phase::Failed && !g_upd.st.error.empty())
-			DrawText(80, H - 130, FitText(T(g_upd.st.error.c_str()), 2, W - 160).c_str(), 2, kAccent);
+			help = g_upd.st.error.c_str(), help_color = kAccent;
 		else if (id == S_UPDATES && !g_upd.helper)
-			DrawText(80, H - 130, FitText(T("Updates are downloaded by the helper: send the payload, then open Settings again."), 2, W - 160).c_str(), 2, kDim);
+			help = "Updates are downloaded by the helper: send the payload, then open Settings again.";
 		else if (id == S_UPDATES && g_upd.st.phase == update::Phase::Available && !Place().writable)
-			DrawText(80, H - 130, FitText(T("This copy can't be updated from the app (Cross says why)."), 2, W - 160).c_str(), 2, kAccent);
+			help = "This copy can't be updated from the app (Cross says why).", help_color = kAccent;
 		else if (id < S_COUNT && *SettingHelp(id))
-			DrawText(80, H - 130, FitText(T(SettingHelp(id)), 2, W - 160).c_str(), 2, kDim);
+			help = SettingHelp(id);
+		if (help)
+			DrawHelpLines(T(help), bottom + 12, help_color);
 		Present();
 		const Nav n = nav.Read();
 		if (n.up || n.down)

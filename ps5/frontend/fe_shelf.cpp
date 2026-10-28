@@ -688,10 +688,10 @@ NetView NetStatus(std::map<std::string, double>& since, double now)
 		}
 		else
 		{
-			// netfs's own reason stays in English (it is the log's text too)
+			// netfs's own reason (English in the log), in the chosen language
 			char text[256];
 			snprintf(text, sizeof(text), T("%s is not available."), s.label.c_str());
-			v.lines.push_back({s.error.empty() ? std::string(text) : s.error, Rgb(255, 150, 150), false});
+			v.lines.push_back({s.error.empty() ? std::string(text) : TNet(s.error), Rgb(255, 150, 150), false});
 		}
 	}
 	return v;
@@ -838,7 +838,7 @@ std::string Shelf()
 			for (const std::string& ev : netfs_take_events())
 			{
 				OrbisLog("[net] %s", ev.c_str());
-				ProsperoNotify("Stella PS5: %s", ev.c_str());
+				ProsperoNotify("Stella PS5: %s", TNet(ev).c_str());
 			}
 			std::vector<std::string> mounts = netfs_mount_points();
 			// names from the CRC pass count when it is done, or a minute after the last look

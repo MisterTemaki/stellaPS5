@@ -8,7 +8,7 @@ the Atari 5200, the Atari 7800 and the Atari Lynx, each with its own core:
 |---|---|---|---|
 | Atari 2600 (VCS) | **Stella 7.0** | `.a26` `.bin` `.rom` | none |
 | Atari 5200 | a5200 | `.a52` `.bin` | `5200.rom` optional: a free replacement (Altirra's) is built in |
-| Atari 7800 | ProSystem | `.a78` `.bin` | none (its BIOS is not used) |
+| Atari 7800 | ProSystem | `.a78` `.bin` | none (ProSystem gets an empty folder of its own, so it never loads a 7800 BIOS) |
 | Atari Lynx | Gearlynx | `.lnx` `.lyx` `.o` | **`lynxboot.img` needed** (512 bytes) |
 
 Games can also be inside a `.zip` or a `.7z` (see [Zip and 7-Zip archives](#zip-and-7-zip-archives)), and can be
@@ -28,12 +28,12 @@ PS5 and Snes9x PS5, the ports it comes from:
 
 Everything outside `ps5/` is **Stella 7.0** (tag `7.0`, commit `d55b1aec0d067a4c901a6dcdf81cb8f579685659`), as the
 repository's first commit has it, apart from this README (Stella's own is [README-Stella.md](README-Stella.md)) and
-**one line** in Stella's libretro port, marked `Stella PS5:` (see [Building](#building)). The emulator (`src/emucore`,
+**three small changes** in Stella's libretro port, each marked `Stella PS5:` (see [Building](#building)). The emulator (`src/emucore`,
 `src/common`) and its libretro port (`src/os/libretro`) are compiled from the port's own source list. The frontend
 drives the cores through their libretro interface and plays the part RetroArch plays on a PC.
 
 > **Status (1.0):** builds with the ps5-payload-dev SDK into a signed native app (`eboot.bin`) and its payload, and
-> passes 504 host tests (with netfs's 235 checks, the 7z reader's 43, the NFS backend's and the tabs' unit tests), which
+> passes 541 host tests (with netfs's 235 checks, the 7z reader's 43, the NFS backend's and the tabs' unit tests), which
 > run the same code -- the four cores included -- on Linux
 > with the PS5 calls simulated: test programs written for this port (a 2600 game that shows on screen which inputs
 > and switches it sees, a 5200, a 7800 and a Lynx program) are played through the whole chain -- the shelf, the pad,
@@ -92,7 +92,13 @@ The app updates itself from this repository's GitHub releases, as Beetle PCE PS5
 - The zip is checked before anything is written: its size and SHA-256 against what GitHub gives, then every file
   against the zip's own list (`PPSA99927/manifest.sha256`). Each file is written beside the old one, then all are put
   in place with `eboot.bin` last; files the new version no longer has are removed, and the home screen's copy of the
-  art is refreshed. If anything fails before that, nothing has changed. Games, saves and settings (`/data/stella/`)
+  art is refreshed. If anything fails before that, nothing has changed.
+- **The install journal** (Media Player Classic PS5 1.5's): while the files are put in place, `update.journal` in the
+  app folder lists each one, its old copy kept as `<name>.old.<n>` until the last one is in. If a rename fails, the
+  files already moved are put back; if the install is cut off (power, a crash), the helper puts the old version back
+  the next time it starts (`helper.log` says so; a notification only when a file couldn't be put back). If the
+  journal itself is damaged, it is left alone and a notification says to send the payload again: `StellaPS5.elf` then
+  writes every file again from its own copy and removes the update's leftovers. Games, saves and settings (`/data/stella/`)
   aren't touched.
 - **With ShadowMount+** (Media Player Classic PS5 1.5's fix, found by Sulfurico-One64 there). ShadowMount+ registers
   the app by mounting its folder on `/system_ex/app/PPSA99927` (nullfs), and the console runs it from there. That
@@ -148,8 +154,8 @@ translated.
    ```sh
    nc -q0 PS5_IP 9021 < StellaPS5-v1.0.elf
    ```
-   It installs the app in `/data/homebrew/PPSA99927/` (`eboot.bin`, `sce_module/libc.prx`, `param.json`, the icon
-   and the backgrounds), shows **"Stella PS5 1.0 installed. Open it from the Stella PS5 icon on the home screen."**
+   It installs the app in `/data/homebrew/PPSA99927/` (`eboot.bin`, `sce_module/libc.prx`, `param.json`, the icon,
+   the backgrounds and `licenses/`: the GPL, the LGPL 2.1 and `NOTICES.txt`, what is in the app and under which terms), shows **"Stella PS5 1.0 installed. Open it from the Stella PS5 icon on the home screen."**
    and stays running as the helper.
 2. **Open the Stella PS5 icon.** The game shelf appears and the controller works.
 3. **Copy your games** to their system's folder, over FTP for example. The app makes the folders on its first start:
@@ -168,9 +174,16 @@ translated.
    when it is there; without it a5200 runs Altirra's free 5200 BIOS, and a 5200 game started without it says so).
 
 **Which system a file is:** its extension when it says (`.a26`, `.a52`, `.a78`, `.lnx`, `.lyx`, `.o`). A `.bin` or
-`.rom` is the system of the folder it is in (`roms/Atari5200/game.bin` is a 5200 game, at any depth), else the
-system whose game table knows its CRC32, else the 2600. A 7800 `.bin` without its `.a78` header plays from
+`.rom` is the system of the folder it is in or of one of the two folders above it (`roms/Atari5200/game.bin` and
+`roms/Atari5200/Homebrew/2024/game.bin` are 5200 games; a folder whose name has `2600`, `5200`, `7800`, `Lynx` or is
+`VCS`), else the system whose game table knows its CRC32, else the 2600. A 7800 `.bin` without its `.a78` header plays from
 `roms/Atari7800`.
+
+**Files that aren't games** are refused before the core sees them, with a message naming the file: a 2600 image
+under 32 bytes, a 7800 file too small for a cartridge or whose `.a78` header names a cartridge type its size can't be
+(Absolute, Activision, Souper, bank-switched...), a 7800 `.bin` over 64 KiB not in 16 KiB banks, and a file larger
+than its system's games (2600: 512 KiB; 5200: 128 KiB; 7800 and Lynx: 2 MiB). A file the 2600 runs but that never
+shows a picture says so on the screen after a few seconds (it may be another system's game).
 
 Tip: put `StellaPS5.elf` in your autoload, as PS5SX2 recommends for its payloads.
 
@@ -279,8 +292,8 @@ when it starts, and once on the shelf to name it (its MD5 is Stella's database k
 
 - **7-Zip methods:** LZMA, LZMA2, PPMd, with the BCJ / BCJ2 / ARM / Delta filters, and stored files -- not BZip2,
   Deflate, Zstandard or encrypted archives (the screen says why such an archive can't start).
-- **Limits:** a game of 512 KiB at most inside an archive (the 2600's largest cartridges; 7800 and Lynx games are
-  smaller); a "solid" block over 64 MiB is refused; an archive listing more than 65,536 files is refused.
+- **Limits:** a game inside an archive is at most its system's largest (2600: 512 KiB; 5200: 128 KiB; 7800 and Lynx:
+  2 MiB, header included); a "solid" block over 64 MiB is refused; an archive listing more than 65,536 files is refused.
 - The 7z decoder is the [LZMA SDK](https://www.7-zip.org/sdk.html)'s C decoder (7-Zip 26.05, public domain).
 
 ## Controls
@@ -459,31 +472,46 @@ make ps5 -j$(nproc)              # build/ps5/StellaPS5.elf (installer + helper, 
 make send PS5_HOST=192.168.0.10  # sends it to elfldr (port 9021)
 make dist                        # build/dist/StellaPS5-v<version>.elf, StellaPS5-v<version>-PPSA99927.zip, the source zip
 make app                         # only build/app/PPSA99927/, to copy by hand
-make test                        # Linux builds (app, installer, helper) + the 504 host tests (ASan/UBSan), with netfs's,
+make test                        # Linux builds (app, installer, helper) + the 541 host tests (ASan/UBSan), with netfs's,
                                  # the NFS backend's, the tabs' and the 7z reader's unit tests
 ```
 
 - **Stella** is built from its libretro port's own source list (`src/os/libretro/Makefile.common`'s `SOURCES_CXX`)
   with that port's flags (`-D__LIB_RETRO__ -DSOUND_SUPPORT`, C++20), but `libretro.cxx` itself, which
   `ps5/frontend/fe_stella.cxx` compiles inside the bridge to Stella's own API (the console's switches, the palette,
-  Stella's database, what it detected). **One change to Stella:** `StellaLIBRETRO::destroy()` forgets its cached
-  pointer to the TIA's surface (`render_surface = nullptr;`, marked `Stella PS5:` in
-  `src/os/libretro/StellaLIBRETRO.cxx`): without it, a second game in the same session -- going back to the list and
-  starting one, or a power cycle -- drew from freed memory (RetroArch loads the core anew for every game, so it never
-  meets it). The host tests found it under ASan.
-- **a5200, ProSystem, Gearlynx** (`ps5/third_party/cores`) are built from their libretro builds' source lists, with
+  Stella's database, what it detected). **Three changes to Stella's libretro port**, each marked `Stella PS5:`:
+  - `StellaLIBRETRO::destroy()` forgets its cached pointer to the TIA's surface (`render_surface = nullptr;`,
+    `src/os/libretro/StellaLIBRETRO.cxx`): without it, a second game in the same session -- going back to the list
+    and starting one, or a power cycle -- drew from freed memory (RetroArch loads the core anew for every game, so it
+    never meets it). The host tests found it under ASan.
+  - `StellaLIBRETRO::updateVideo()` stops after 700 scanlines (`StellaLIBRETRO.cxx`): its loop waited for the TIA to
+    finish a frame, which a file that never draws one (a non-2600 file run as a 2600 game) never does, and the app hung.
+  - `SoundLIBRETRO::dequeue()` takes the size of the buffer it fills and stops there (`SoundLIBRETRO.hxx`, and the call
+    in `StellaLIBRETRO.cxx`): such a file's long frames queued more sound than the buffer holds.
+  The last two were found by fuzzing the app with odd files.
+- **a5200, ProSystem, Gearlynx** (`ps5/third_party/cores`, unchanged) are built from their libretro builds' source lists, with
   their libretro entry points prefixed and every other name kept inside the core (`ps5/cores.mk`,
   [their README](ps5/third_party/cores/README.md)); `tools/check_core_symbols.py` stops the build if two parts of the
   eboot define one name.
 - `eboot.bin` is a PIE linked against the SDK's stubs and static libc++, then `ps5-native-tool link` and
   `self --sign`, exactly like PS5SX2's `link-vk.sh`; `libc.prx` goes with it.
-- `tools/make_gamedb.py` makes `frontend/data/nointro.tsv` from libretro-database; `tools/make_art.py` the art.
+- `tools/make_gamedb.py` makes `frontend/data/nointro.tsv` from libretro-database; `tools/make_art.py` the art;
+  `tools/make_notices.py` (`make notices`) the app's `licenses/` folder (`app/licenses/`, committed), which the
+  payload installs and the release zip carries.
+- **The source zip** (`make dist`) is `git archive` of the committed tree (`HEAD`: make it from the release's tagged
+  commit), **without Stella's `test/` folder**: its bezel pictures (`test/bezels`) carry a game maker's logo and its
+  profiling ROMs (`test/roms/profile`) are other people's games, neither ours to hand out. Nothing in the build or the
+  tests uses that folder.
 
 ## License and credits
 
-The whole is distributed under the **GNU General Public License, version 3 or later**: Stella, a5200 and ProSystem
-are GPL-2.0-or-later and Gearlynx is GPL-3.0-or-later, so the combined program is GPL-3.0-or-later. Every binary is
-distributed with its complete source (`make dist` makes the source zip).
+The whole is distributed under the **GNU General Public License, version 3 or later** ([COPYING](COPYING)): Stella,
+a5200 and ProSystem are GPL-2.0-or-later and Gearlynx is GPL-3.0-or-later, so the combined program is
+GPL-3.0-or-later. (For a5200 and ProSystem the "or later" rests on their emulator files' own headers, which say
+"version 2 ... or any later version", and on section 9 of the GPL 2 for the files that name no version: their libretro
+glue has no header and their `License.txt` is the bare GPL 2 text; see [the cores' README](ps5/third_party/cores/README.md).)
+Every binary is distributed with its complete source (`make dist` makes the source zip). The app folder carries the
+licences and notices in `licenses/` (`COPYING.txt`, `LGPL-2.1.txt`, `NOTICES.txt`), and so does the release zip.
 
 - **Stella** 7.0 (Bradford W. Mott, Stephen Anthony, Thomas Jentzsch, Christian Speckner, the Stella team and
   contributors, [stella-emu.github.io](https://stella-emu.github.io/), [github.com/stella-emu/stella](https://github.com/stella-emu/stella)):
@@ -495,7 +523,7 @@ distributed with its complete source (`make dist` makes the source zip).
 - **ProSystem** (Greg Stanton; the libretro contributors, [github.com/libretro/prosystem-libretro](https://github.com/libretro/prosystem-libretro)):
   GPL-2.0-or-later; Ron Fries' TIA and POKEY sound, LGPL-2.0; Osman Celimli's BupChip, zlib.
 - **Gearlynx** (Ignacio Sanchez, [github.com/drhelius/Gearlynx](https://github.com/drhelius/Gearlynx)): GPL-3.0-or-later;
-  miniz, Unlicense.
+  miniz (Rich Geldreich, RAD Game Tools and Valve Software), MIT, with parts in the public domain.
 - **New code in `ps5/`**: MIT (each file says so), shared with NES FCEUmm PS5, Beetle PCE PS5, Genesis Plus GX PS5,
   Snes9x PS5 and Media Player Classic PS5.
 - **The home-screen idea** follows [PS5SX2](https://github.com/Swordpdf/PS5SX2) (Spyros): the PS5 layer's pattern

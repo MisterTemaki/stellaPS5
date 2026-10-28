@@ -12,6 +12,7 @@
 #include <set>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace fe
 {
@@ -345,6 +346,13 @@ const Entry kTable[] = {
 		"O arquivo está danificado ou não é um arquivo 7z.", "L'archive est endommagée, ou ce n'est pas une archive 7z.",
 		"Das Archiv ist beschädigt, oder es ist kein 7z-Archiv."},
 	// ---- Stella PS5: the Atari systems, their settings and buttons, the updater
+	{"%s is not a valid %s game.", "%s no es un juego válido de %s.", "%s não é um jogo válido de %s.",
+		"%s n'est pas un jeu %s valide.", "%s ist kein gültiges %s-Spiel."},
+	{"This file shows no picture: it may not be an Atari 2600 game.",
+		"Este archivo no muestra ninguna imagen: puede que no sea un juego de Atari 2600.",
+		"Este arquivo não mostra nenhuma imagem: talvez não seja um jogo de Atari 2600.",
+		"Ce fichier n'affiche aucune image : ce n'est peut-être pas un jeu Atari 2600.",
+		"Diese Datei zeigt kein Bild: Vielleicht ist es kein Atari-2600-Spiel."},
 	{"%s could not start %s (not a game it knows, or a damaged file).",
 		"%s no pudo iniciar %s (no es un juego que conozca, o el archivo está dañado).",
 		"%s não conseguiu iniciar %s (não é um jogo que ele conheça, ou o arquivo está danificado).",
@@ -675,11 +683,11 @@ const Entry kTable[] = {
 		"Os botões abaixo são deste sistema; cada sistema tem os seus.",
 		"Les boutons ci-dessous sont ceux de ce système ; chaque système a les siens.",
 		"Die Tasten darunter gehören zu diesem System; jedes System hat seine eigenen."},
-	{"The game, or the solid block it is packed in, is too big (512 KiB for a game, 64 MiB for a block).",
-		"El juego, o el bloque sólido en que está comprimido, es demasiado grande (512 KiB por juego, 64 MiB por bloque).",
-		"O jogo, ou o bloco sólido em que está compactado, é grande demais (512 KiB por jogo, 64 MiB por bloco).",
-		"Le jeu, ou le bloc solide dans lequel il est compressé, est trop gros (512 Kio par jeu, 64 Mio par bloc).",
-		"Das Spiel oder der feste Block, in den es gepackt ist, ist zu groß (512 KiB je Spiel, 64 MiB je Block)."},
+	{"The game, or the solid block it is packed in, is too big (2 MiB for a game, 64 MiB for a block).",
+		"El juego, o el bloque sólido en que está comprimido, es demasiado grande (2 MiB por juego, 64 MiB por bloque).",
+		"O jogo, ou o bloco sólido em que está compactado, é grande demais (2 MiB por jogo, 64 MiB por bloco).",
+		"Le jeu, ou le bloc solide dans lequel il est compressé, est trop gros (2 Mio par jeu, 64 Mio par bloc).",
+		"Das Spiel oder der feste Block, in den es gepackt ist, ist zu groß (2 MiB je Spiel, 64 MiB je Block)."},
 	{"The keypad: the right stick is 1 to 9 around 5 (as on the controller), R3 is 5.",
 		"El teclado: el stick derecho es del 1 al 9 alrededor del 5 (como en el mando), R3 es el 5.",
 		"O teclado: o analógico direito é do 1 ao 9 em volta do 5 (como no controle), R3 é o 5.",
@@ -759,6 +767,110 @@ const Entry kTable[] = {
 	{"Disabled", "Desactivado", "Desativado", "Désactivé", "Aus"},
 };
 
+
+// netfs's messages (netfs/netfs_share.cpp, netfs_edit.cpp, netfs_core.cpp) as templates: {} is a name (a server, a
+// share, a folder, a count) kept as it is. tests/check_i18n.py checks that each language has the same {} count.
+const Entry kNetTable[] = {
+	{"{} did not answer. Check that it is on and on the same network.",
+		"{} no respondió. Comprueba que esté encendido y en la misma red.",
+		"{} não respondeu. Verifique se está ligado e na mesma rede.",
+		"{} n'a pas répondu. Vérifiez qu'il est allumé et sur le même réseau.",
+		"{} hat nicht geantwortet. Prüfe, ob er eingeschaltet und im selben Netzwerk ist."},
+	{"{} refused the connection. Check that file sharing (SMB) is switched on there.",
+		"{} rechazó la conexión. Comprueba que el uso compartido de archivos (SMB) esté activado allí.",
+		"{} recusou a conexão. Verifique se o compartilhamento de arquivos (SMB) está ativado lá.",
+		"{} a refusé la connexion. Vérifiez que le partage de fichiers (SMB) y est activé.",
+		"{} hat die Verbindung abgelehnt. Prüfe, ob die Dateifreigabe (SMB) dort eingeschaltet ist."},
+	{"{} refused the connection. Check that NFS is switched on there.",
+		"{} rechazó la conexión. Comprueba que NFS esté activado allí.",
+		"{} recusou a conexão. Verifique se o NFS está ativado lá.",
+		"{} a refusé la connexion. Vérifiez que NFS y est activé.",
+		"{} hat die Verbindung abgelehnt. Prüfe, ob NFS dort eingeschaltet ist."},
+	{"{} closed the connection.", "{} cerró la conexión.", "{} fechou a conexão.", "{} a fermé la connexion.",
+		"{} hat die Verbindung geschlossen."},
+	{"No server named {} was found. Use its IP address.",
+		"No se encontró ningún servidor llamado {}. Usa su dirección IP.",
+		"Nenhum servidor chamado {} foi encontrado. Use o endereço IP dele.",
+		"Aucun serveur nommé {} n'a été trouvé. Utilisez son adresse IP.",
+		"Kein Server namens {} gefunden. Verwende seine IP-Adresse."},
+	{"{} denied access. Check the user name and password.",
+		"{} denegó el acceso. Comprueba el nombre de usuario y la contraseña.",
+		"{} negou o acesso. Verifique o nome de usuário e a senha.",
+		"{} a refusé l'accès. Vérifiez le nom d'utilisateur et le mot de passe.",
+		"{} hat den Zugriff verweigert. Prüfe Benutzername und Passwort."},
+	{"The share {} is not on {}. Shares there: {}.",
+		"La carpeta compartida {} no está en {}. Carpetas compartidas allí: {}.",
+		"O compartilhamento {} não está em {}. Compartilhamentos lá: {}.",
+		"Le partage {} n'est pas sur {}. Partages présents : {}.",
+		"Die Freigabe {} ist nicht auf {}. Freigaben dort: {}."},
+	{"The export {} is not on {}. Exports there: {}.",
+		"La exportación {} no está en {}. Exportaciones allí: {}.",
+		"A exportação {} não está em {}. Exportações lá: {}.",
+		"L'export {} n'est pas sur {}. Exports présents : {}.",
+		"Der Export {} ist nicht auf {}. Exporte dort: {}."},
+	{"The share {} is not on {}.", "La carpeta compartida {} no está en {}.", "O compartilhamento {} não está em {}.",
+		"Le partage {} n'est pas sur {}.", "Die Freigabe {} ist nicht auf {}."},
+	{"The export {} is not on {}.", "La exportación {} no está en {}.", "A exportação {} não está em {}.",
+		"L'export {} n'est pas sur {}.", "Der Export {} ist nicht auf {}."},
+	{"The folder {} is not on {}.", "La carpeta {} no está en {}.", "A pasta {} não está em {}.",
+		"Le dossier {} n'est pas sur {}.", "Der Ordner {} ist nicht auf {}."},
+	{"{} only speaks SMB1, which is not supported. Turn on SMB 2 or 3 on the server.",
+		"{} solo usa SMB1, que no es compatible. Activa SMB 2 o 3 en el servidor.",
+		"{} só usa SMB1, que não é suportado. Ative o SMB 2 ou 3 no servidor.",
+		"{} ne parle que SMB1, qui n'est pas pris en charge. Activez SMB 2 ou 3 sur le serveur.",
+		"{} spricht nur SMB1, das nicht unterstützt wird. Schalte SMB 2 oder 3 auf dem Server ein."},
+	{"{} requires signing. Turn on Signing for this share (?sign in shares.txt).",
+		"{} exige firma. Activa la firma para esta carpeta compartida (?sign en shares.txt).",
+		"{} exige assinatura. Ative a assinatura para este compartilhamento (?sign no shares.txt).",
+		"{} exige la signature. Activez la signature pour ce partage (?sign dans shares.txt).",
+		"{} verlangt Signierung. Schalte die Signierung für diese Freigabe ein (?sign in shares.txt)."},
+	{"This protocol is not built into this release.", "Este protocolo no está incluido en esta versión.",
+		"Este protocolo não está incluído nesta versão.", "Ce protocole n'est pas inclus dans cette version.",
+		"Dieses Protokoll ist in dieser Version nicht enthalten."},
+	{"The connection to {} was lost.", "Se perdió la conexión con {}.", "A conexão com {} foi perdida.",
+		"La connexion à {} a été perdue.", "Die Verbindung zu {} ist abgebrochen."},
+	{"Connected to {}", "Conectado a {}", "Conectado a {}", "Connecté à {}", "Verbunden mit {}"},
+	{"Could not use {}: {}", "No se pudo usar {}: {}", "Não foi possível usar {}: {}", "Impossible d'utiliser {} : {}",
+		"{} konnte nicht verwendet werden: {}"},
+	{"Could not use {}.", "No se pudo usar {}.", "Não foi possível usar {}.", "Impossible d'utiliser {}.",
+		"{} konnte nicht verwendet werden."},
+	{"Connected, but the folder could not be read ({}).", "Conectado, pero no se pudo leer la carpeta ({}).",
+		"Conectado, mas não foi possível ler a pasta ({}).", "Connecté, mais le dossier n'a pas pu être lu ({}).",
+		"Verbunden, aber der Ordner konnte nicht gelesen werden ({})."},
+	{"Connected, but the folder is empty.", "Conectado, pero la carpeta está vacía.", "Conectado, mas a pasta está vazia.",
+		"Connecté, mais le dossier est vide.", "Verbunden, aber der Ordner ist leer."},
+	{"Connected. The folder has {} and {}.", "Conectado. La carpeta tiene {} y {}.", "Conectado. A pasta tem {} e {}.",
+		"Connecté. Le dossier contient {} et {}.", "Verbunden. Der Ordner enthält {} und {}."},
+	{"1 file", "1 archivo", "1 arquivo", "1 fichier", "1 Datei"},
+	{"{} files", "{} archivos", "{} arquivos", "{} fichiers", "{} Dateien"},
+	{"1 folder", "1 carpeta", "1 pasta", "1 dossier", "1 Ordner"},
+	{"{} folders", "{} carpetas", "{} pastas", "{} dossiers", "{} Ordner"},
+	{"Enter the server's IP address, like 192.168.1.50.", "Escribe la dirección IP del servidor, como 192.168.1.50.",
+		"Digite o endereço IP do servidor, como 192.168.1.50.", "Saisissez l'adresse IP du serveur, comme 192.168.1.50.",
+		"Gib die IP-Adresse des Servers ein, etwa 192.168.1.50."},
+	{"The server is an IP address or a name, like 192.168.1.50, with no slashes or spaces.",
+		"El servidor es una dirección IP o un nombre, como 192.168.1.50, sin barras ni espacios.",
+		"O servidor é um endereço IP ou um nome, como 192.168.1.50, sem barras nem espaços.",
+		"Le serveur est une adresse IP ou un nom, comme 192.168.1.50, sans barres obliques ni espaces.",
+		"Der Server ist eine IP-Adresse oder ein Name, etwa 192.168.1.50, ohne Schrägstriche und Leerzeichen."},
+	{"Enter the share's name, as the server calls it.", "Escribe el nombre de la carpeta compartida, como la llama el servidor.",
+		"Digite o nome do compartilhamento, como o servidor o chama.", "Saisissez le nom du partage, tel que le serveur l'appelle.",
+		"Gib den Namen der Freigabe ein, wie der Server sie nennt."},
+	{"Enter the export path, like /export/atari.", "Escribe la ruta de la exportación, como /export/atari.",
+		"Digite o caminho da exportação, como /export/atari.", "Saisissez le chemin de l'export, comme /export/atari.",
+		"Gib den Pfad des Exports ein, etwa /export/atari."},
+	{"Another share already uses that folder.", "Otra carpeta compartida ya usa esa carpeta.",
+		"Outro compartilhamento já usa essa pasta.", "Un autre partage utilise déjà ce dossier.",
+		"Eine andere Freigabe verwendet diesen Ordner schon."},
+	{"The app has no /data/stella folder, so shares cannot be kept.",
+		"La app no tiene la carpeta /data/stella, así que no puede guardar las carpetas compartidas.",
+		"O app não tem a pasta /data/stella, então não dá para guardar os compartilhamentos.",
+		"L'app n'a pas de dossier /data/stella : les partages ne peuvent pas être enregistrés.",
+		"Die App hat keinen Ordner /data/stella, daher können keine Freigaben gespeichert werden."},
+	{"shares.txt line {}: {}", "shares.txt, línea {}: {}", "shares.txt, linha {}: {}", "shares.txt, ligne {} : {}",
+		"shares.txt, Zeile {}: {}"},
+};
+
 const char* const kLanguageNames[] = {"English", "Español", "Português (Brasil)", "Français", "Deutsch"};
 
 const std::unordered_map<std::string, const Entry*>& Index()
@@ -808,4 +920,87 @@ const char* T(const char* english)
 	const char* t = lang == 1 ? e.es : lang == 2 ? e.pt : lang == 3 ? e.fr : e.de;
 	return t && *t ? t : english;
 }
+
+namespace
+{
+std::string TNetIn(const std::string& text, bool part);
+}
+
+std::string TNet(const std::string& text)
+{
+	return TNetIn(text, false);
+}
+
+namespace
+{
+// `part`: a name taken out of a template (a share, a path, a server's own error...): translated when it is one of
+// the texts (a template or the table's), else kept as it is (and not counted as a text without a translation)
+std::string TNetIn(const std::string& text, bool part)
+{
+	const int lang = Config().language;
+	if (lang <= 0 || lang >= int(Language::Count) || text.empty())
+		return text;
+	for (const Entry& e : kNetTable)
+	{
+		// the template's pieces between its {}: each one must follow the last, the names are what lies between
+		const std::string en = e.en;
+		std::vector<std::string> pieces;
+		size_t a = 0, b;
+		while ((b = en.find("{}", a)) != std::string::npos)
+		{
+			pieces.push_back(en.substr(a, b - a));
+			a = b + 2;
+		}
+		pieces.push_back(en.substr(a));
+		std::vector<std::string> args;
+		size_t at = 0;
+		bool ok = text.compare(0, pieces[0].size(), pieces[0]) == 0;
+		at = pieces[0].size();
+		for (size_t i = 1; ok && i < pieces.size(); i++)
+		{
+			const bool last = i + 1 == pieces.size();
+			size_t next;
+			if (last)
+			{
+				// the end: what is left must end with the last piece (and leave a name before it)
+				ok = text.size() >= at + pieces[i].size() + 1 &&
+					 text.compare(text.size() - pieces[i].size(), pieces[i].size(), pieces[i]) == 0;
+				next = text.size() - pieces[i].size();
+			}
+			else
+			{
+				next = pieces[i].empty() ? std::string::npos : text.find(pieces[i], at + 1);
+				ok = next != std::string::npos;
+			}
+			if (ok)
+			{
+				args.push_back(text.substr(at, next - at));
+				at = next + pieces[i].size();
+			}
+		}
+		if (!ok || (pieces.size() == 1 && text != en))
+			continue;
+		const char* tr = lang == 1 ? e.es : lang == 2 ? e.pt : lang == 3 ? e.fr : e.de;
+		std::string out, form = tr;
+		size_t k = 0, p = 0, q;
+		while ((q = form.find("{}", p)) != std::string::npos)
+		{
+			out += form.substr(p, q - p);
+			out += k < args.size() ? TNetIn(args[k], true) : std::string();
+			k++;
+			p = q + 2;
+		}
+		out += form.substr(p);
+		return out;
+	}
+	if (part)
+	{
+		const auto it = Index().find(text);
+		if (it == Index().end())
+			return text;
+	}
+	return T(text.c_str());
+}
+} // namespace
 } // namespace fe
+

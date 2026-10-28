@@ -8,8 +8,10 @@
 //   2. Install: the zip is downloaded (into memory), its size and SHA-256 checked; it holds the app folder
 //      (<TITLE_ID>/ ...) stored without compression and a manifest (<TITLE_ID>/manifest.sha256: "<sha-256> *<path>"
 //      lines); every file is checked against the manifest. Only then is anything written: each file beside the old
-//      one as <name>.new, then all renamed over the old ones, eboot.bin and the manifest last; files the old
-//      manifest had and the new one hasn't are removed; the home screen's copy of the art (/user/appmeta/<ID>) is
+//      one as <name>.new, then all renamed over the old ones, eboot.bin and the manifest last, each old file kept as
+//      <name>.old.<transaction> while update.journal lists them (a rename that fails puts the old ones back, and an
+//      install cut off half way is put back when the helper next starts); files the old manifest had and the new
+//      one hasn't are removed; the home screen's copy of the art (/user/appmeta/<ID>) is
 //      brought up to date. If anything fails before the renames, the .new files go and nothing has changed.
 //   3. The running app is the old build: it has to be opened again.
 //
@@ -108,4 +110,11 @@ std::string Sha256Hex(const uint8_t* data, size_t size);
 // unless the error says otherwise). files_done follows the files written.
 std::string InstallZip(const std::vector<uint8_t>& zip, const std::string& expect_sha256, const Config& config,
 	std::atomic<size_t>* files_done = nullptr, std::atomic<size_t>* files_total = nullptr);
+// An install interrupted while its files were going into place (update.journal still there; Media Player Classic
+// PS5 1.5's journal): the old files back (<name>.old.<transaction>), the new ones removed. The journal goes only when
+// every file is back; what couldn't be put back stays in it for the next try. Returns the files put back. The helper
+// runs it when it starts, and an install first.
+int RecoverInterrupted(const std::string& app_dir);
+// Set when RecoverInterrupted couldn't put everything back (a sentence for the user); "" otherwise.
+std::string StartupProblem();
 } // namespace update

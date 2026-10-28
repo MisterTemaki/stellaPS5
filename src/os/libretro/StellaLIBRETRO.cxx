@@ -164,7 +164,9 @@ void StellaLIBRETRO::updateVideo()
 {
   TIA& tia = myOSystem->console().tia();
 
-  while (true)
+  // Stella PS5: at most about two PAL frames' worth of scanlines a call. A program that never ends a frame (a file
+  // that isn't a 2600 game: a few NOPs, random bytes) kept this loop going for ever, and the frontend with it
+  for (int lines = 0; lines < 700; ++lines)
   {
     tia.updateScanline();
 
@@ -185,7 +187,7 @@ void StellaLIBRETRO::updateVideo()
 // - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 void StellaLIBRETRO::updateAudio()
 {
-  static_cast<SoundLIBRETRO&>(myOSystem->sound()).dequeue(audio_buffer.get(), &audio_samples);
+  static_cast<SoundLIBRETRO&>(myOSystem->sound()).dequeue(audio_buffer.get(), &audio_samples, audio_buffer_max); // Stella PS5: the bound
 }
 
 // - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
