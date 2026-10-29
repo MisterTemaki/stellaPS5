@@ -2146,6 +2146,12 @@ make -n build/host/stella-ps5-host >"$WORK/t46-make-same.txt" 2>&1
 [ -f "$WORK/defs.stamp.keep" ] && cp -p "$WORK/defs.stamp.keep" build/defs.stamp
 expect "grep -q 'main-boot.cpp' $WORK/t46-make-new.txt && grep -q 'installer_main.cpp' $WORK/t46-make-new.txt && grep -q 'fe_shelf.cpp' $WORK/t46-make-new.txt" "a new VERSION: the objects that carry it are built again (make -n)"
 expect "! grep -q 'main-boot.cpp\|installer_main.cpp' $WORK/t46-make-same.txt" "... the same VERSION: nothing built again"
+# ... and the stamp is made again when it goes after the Makefile was read (make clean ps5: clean deletes build/)
+make -s --eval 'audit-rm-stamp: ; @rm -f build/defs.stamp' audit-rm-stamp build/defs.stamp >"$WORK/t46-make-clean.txt" 2>&1
+rc=$?
+stamp=$(cat build/defs.stamp 2>/dev/null)
+[ -f "$WORK/defs.stamp.keep" ] && cp -p "$WORK/defs.stamp.keep" build/defs.stamp
+expect "[ $rc = 0 ] && [ \"$stamp\" = \"$VER 7.0 PPSA99927 MisterTemaki/stellaPS5\" ]" "the stamp removed during the run (make clean <target>): made again (exit $rc)"
 # b. the eboot's operator new (proto/native/tooling/native/app_cpp_runtime.cpp): a failed allocation is std::bad_alloc
 mkdir -p "$WORK/t46-new"
 cat >"$WORK/t46-new/main.cpp" <<'EOF'

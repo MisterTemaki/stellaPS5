@@ -152,6 +152,9 @@ DEFS_TEXT := $(VERSION) $(CORE_VERSION) $(TITLE_ID) $(UPDATE_REPO)
 ifneq ($(shell cat $(DEFS_STAMP) 2>/dev/null),$(DEFS_TEXT))
 $(shell mkdir -p build && printf '%s\n' '$(DEFS_TEXT)' >$(DEFS_STAMP))
 endif
+# ... and made again when something removed it after the Makefile was read (make clean ps5: clean deletes build/)
+$(DEFS_STAMP):
+	@mkdir -p $(dir $@) && printf '%s\n' '$(DEFS_TEXT)' >$@
 MINIZIP_FLAGS := -DNOUNCRYPT -I$(ROOT)/ps5/third_party/zlib -w
 PORT_WARN := -Wall -Wextra -Werror -Wno-unused-parameter -Wno-missing-field-initializers
 

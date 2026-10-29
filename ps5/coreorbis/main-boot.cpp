@@ -32,6 +32,7 @@
 #include "fe_shelf.h"
 #include "netfs.h"
 
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -242,7 +243,8 @@ void ExceptionSelfTest()
 	oom_how = "missed";
 	try
 	{
-		volatile size_t huge = size_t(1) << 46; // 64 TiB: no allocator gives that
+		// over PTRDIFF_MAX: the allocator refuses it itself, without asking the kernel for anything
+		volatile size_t huge = SIZE_MAX / 2 + 1;
 		void* p = ::operator new(huge);
 		::operator delete(p);
 	}

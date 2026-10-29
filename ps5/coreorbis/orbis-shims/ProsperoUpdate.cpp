@@ -693,10 +693,10 @@ static std::string FileSha(const std::string& path)
 	Sha256 s;
 	if (FILE* f = fopen(path.c_str(), "rb"))
 	{
-		uint8_t buf[65536];
+		std::vector<uint8_t> buf(65536); // on the heap: the helper's main thread runs this too (RecoverInterrupted)
 		size_t n;
-		while ((n = fread(buf, 1, sizeof(buf), f)) > 0)
-			s.Add(buf, n);
+		while ((n = fread(buf.data(), 1, buf.size(), f)) > 0)
+			s.Add(buf.data(), n);
 		fclose(f);
 	}
 	return s.Hex();
