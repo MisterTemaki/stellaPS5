@@ -81,7 +81,7 @@ expect "grep -qE 'Stella: \"test\", md5 [0-9a-f]{32}, NTSC( \*)?, bankswitching 
 expect "grep -q 'picture 160x228 (228 lines, aspect 1.4035, Fit to screen)' $T/root/logs/boot.log" "Stella's TV picture (160x228, its double-width pixels), fit to the screen"
 expect "[ -f $T/root/states/Atari2600/test.state1 ] && grep -q 'save state 1: ok' $T/root/logs/boot.log" "L2 + Up wrote states/Atari2600/test.state1"
 expect "grep -q 'cores: Stella (Atari 2600), a5200 (Atari 5200), ProSystem (Atari 7800), Gearlynx (Atari Lynx)' $T/root/logs/boot.log" "the four cores are built in"
-expect "grep -q '\[boot\] exceptions: ok (our throw caught, libc++.s std::invalid_argument caught)' $T/root/logs/boot.log" "the start checks C++ exceptions (debug logs on): ok"
+expect "grep -q '\[boot\] exceptions: ok (our throw caught, libc++.s std::invalid_argument caught, operator new.s std::bad_alloc not tried on the host)' $T/root/logs/boot.log" "the start checks C++ exceptions (debug logs on): ok"
 expect "grep -q '\[emu\] step: core: retro_load_game' $T/root/logs/boot.log && grep -q '\[emu\] step: the first frames ran' $T/root/logs/boot.log && grep -q '\[file\] fopen .*test.a26' $T/root/logs/boot.log && grep -q '\[emu\] environment ' $T/root/logs/boot.log" "a game's start logged step by step (the core's calls, its environment calls, the files), up to the third frame"
 nosan "$T"
 fi
@@ -2035,7 +2035,7 @@ python3 - $H <<'PY'
 import hashlib, os, sys
 h = sys.argv[1]
 def fsha(p):
-    return hashlib.sha256(open(p, 'rb').read()[:1 << 20]).hexdigest()
+    return hashlib.sha256(open(p, 'rb').read()).hexdigest()
 os.rename(h + '/eboot.bin', h + '/eboot.bin.old.123-1')
 open(h + '/update.journal', 'w').write('stellaps5-update-journal 1 123-1\n1\t%s\teboot.bin\n0\t-\tsce_sys/added.bin\n1\t%s\tsce_sys/param.json\nend\n'
     % (fsha(h + '/eboot.bin.old.123-1'), fsha(h + '/sce_sys/param.json')))
@@ -2060,6 +2060,29 @@ stop_helpers
 STELLAPS5_ROOT=$T/root STELLAPS5_HOMEBREW=$T/homebrew STELLAPS5_APPMETA=$T/appmeta ASAN_OPTIONS=detect_leaks=0 timeout 60 "$INSTALLER" >"$T/inst-repair.txt" 2>&1 &
 waitfor $T/inst-repair.txt 'listening on 127.0.0.1'
 expect "grep -q 'an update wasn.t finished; repairing the app' $T/inst-repair.txt && [ ! -e $H/update.journal ] && [ ! -e $H/eboot.bin.old.9-9 ] && cmp -s $H/eboot.bin tests/fake-eboot.bin" "the payload repairs it: its files back, the journal and the leftovers gone"
+# e. (1.0.2) the journal's SHA-256 is the whole file's: an eboot.bin over 1 MiB already put back is told from one that
+# only starts the same (1.0.1 hashed the first MiB only)
+stop_helpers
+python3 - $H <<'PY'
+import hashlib, os, sys
+h = sys.argv[1]
+old = os.urandom(1 << 20) + b'the old eboot, past its first MiB\n'
+open(h + '/eboot.bin', 'wb').write(old)
+open(h + '/update.journal', 'w').write('stellaps5-update-journal 1 77-1\n1\t%s\teboot.bin\nend\n' % hashlib.sha256(old).hexdigest())
+PY
+helper44
+expect "grep -q 'an install was cut off half way: the old version put back (1 file(s))' $T/root/logs/helper.log && ! grep -q 'its old copy is gone' $T/root/logs/helper.log && [ ! -e $H/update.journal ]" "a big eboot.bin already put back (its old copy gone): known by its whole SHA-256, the journal goes"
+stop_helpers
+python3 - $H <<'PY'
+import hashlib, os, sys
+h = sys.argv[1]
+cur = open(h + '/eboot.bin', 'rb').read()
+other = cur[:1 << 20] + b'another eboot past the same first MiB\n'
+open(h + '/update.journal', 'w').write('stellaps5-update-journal 1 78-1\n1\t%s\teboot.bin\nend\n' % hashlib.sha256(other).hexdigest())
+PY
+helper44
+expect "grep -q 'eboot.bin: its old copy is gone, it can.t be put back' $T/root/logs/helper.log" "... one that only starts like the old one (the same first MiB): said to be lost, not taken for it"
+stop_helpers
 expect "! grep -q 'runtime error\|AddressSanitizer' $T/helper.txt $T/inst-repair.txt" "no sanitizer reports"
 stop44
 fi
@@ -2110,6 +2133,91 @@ if [ -d "$SDKLIB" ] && command -v ld.lld >/dev/null && command -v clang >/dev/nu
 else
 	echo "  (skipped: no SDK, ld.lld or clang for the check's own test)"
 fi
+fi
+
+if want 46; then
+echo "== 46. the 1.0.2 audit: the version reaches every object, a failed allocation throws, the helper's HTTP client keeps its limits, the shelf without threads, the crash report"
+# a. a new VERSION (TITLE_ID, UPDATE_REPO) rebuilds what is built with it; the same one rebuilds nothing
+cp -p build/defs.stamp "$WORK/defs.stamp.keep" 2>/dev/null
+make -n build/host/stella-ps5-host VERSION=9.8.7 >"$WORK/t46-make-new.txt" 2>&1
+make -n build/host/stella-ps5-host >"$WORK/t46-make-same.txt" 2>&1
+[ -f "$WORK/defs.stamp.keep" ] && cp -p "$WORK/defs.stamp.keep" build/defs.stamp
+expect "grep -q 'main-boot.cpp' $WORK/t46-make-new.txt && grep -q 'installer_main.cpp' $WORK/t46-make-new.txt && grep -q 'fe_shelf.cpp' $WORK/t46-make-new.txt" "a new VERSION: the objects that carry it are built again (make -n)"
+expect "! grep -q 'main-boot.cpp\|installer_main.cpp' $WORK/t46-make-same.txt" "... the same VERSION: nothing built again"
+# b. the eboot's operator new (proto/native/tooling/native/app_cpp_runtime.cpp): a failed allocation is std::bad_alloc
+mkdir -p "$WORK/t46-new"
+cat >"$WORK/t46-new/main.cpp" <<'EOF'
+#include <cstdint>
+#include <cstdio>
+#include <new>
+int main()
+{
+	int caught = 0;
+	volatile size_t huge = SIZE_MAX / 4;
+	try { void* p = ::operator new(huge); ::operator delete(p); } catch (const std::bad_alloc&) { caught++; }
+	try { char* p = new char[huge]; delete[] p; } catch (const std::bad_alloc&) { caught++; }
+	try { void* p = ::operator new(huge, std::align_val_t(64)); ::operator delete(p, std::align_val_t(64)); } catch (const std::bad_alloc&) { caught++; }
+	void* q = ::operator new(huge, std::nothrow);
+	void* r = ::operator new(16);
+	::operator delete(r);
+	std::printf("caught %d, nothrow %s\n", caught, q ? "allocated" : "null");
+	return caught == 3 && !q ? 0 : 1;
+}
+EOF
+g++ -std=c++20 -O1 -fno-rtti -o "$WORK/t46-new/rt" "$WORK/t46-new/main.cpp" proto/native/tooling/native/app_cpp_runtime.cpp -Wno-alloc-size-larger-than >"$WORK/t46-new/build.txt" 2>&1
+"$WORK/t46-new/rt" >"$WORK/t46-new/out.txt" 2>&1
+rc=$?
+expect "[ $rc = 0 ] && grep -q 'caught 3, nothrow null' $WORK/t46-new/out.txt" "the eboot's operator new: a failed allocation throws std::bad_alloc (new, new[], aligned), nothrow gives null (got $rc: $(head -c 80 $WORK/t46-new/out.txt))"
+# c. the helper's HTTP client: a chunk size near 2^64 is over the limit at once (it used to wrap round and read on)
+stop_helpers
+T=$(newroot t46-chunk)
+mkdir -p "$T/root/covers"
+OPORT=$((18000 + RANDOM % 1900))
+python3 tests/odd_http_server.py $OPORT bigchunk 2>"$T/server.txt" &
+osp=$!
+sleep 0.5
+printf 'Atari2600/Big.png\thttp://127.0.0.1:%s/big.png\n' $OPORT >"$T/root/covers/wanted.txt"
+STELLAPS5_ROOT=$T/root ASAN_OPTIONS=detect_leaks=0 timeout 8 "$HELPER" >"$T/helper.txt" 2>&1
+kill $osp 2>/dev/null; wait $osp 2>/dev/null
+stop_helpers
+H="$T/root/logs/helper.log"
+expect "grep -q 'GET http://127.0.0.1:$OPORT/big.png -> -2,' $H && ! grep -q 'a chunk stopped' $H" "a chunk bigger than the answer may be: refused at once as too big (-2), not read on"
+expect "[ \$(grep -c 'GET /big.png' $T/server.txt) = 1 ] && [ ! -e $T/root/covers/Atari2600/Big.png ]" "... asked once, nothing saved"
+# d. a redirect from HTTPS down to plain HTTP isn't followed
+C=$WORK/t46-certs; rm -rf "$C"; mkdir -p "$C"
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout "$C/ca.key" -out "$C/ca.pem" -days 30 -subj "/CN=Stella PS5 Test CA" 2>/dev/null
+openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout "$C/srv.key" -out "$C/srv.csr" -subj "/CN=localhost" 2>/dev/null
+printf 'subjectAltName=DNS:localhost\nbasicConstraints=CA:FALSE\n' >"$C/ext.cnf"
+openssl x509 -req -in "$C/srv.csr" -CA "$C/ca.pem" -CAkey "$C/ca.key" -CAcreateserial -out "$C/srv.pem" -days 30 -extfile "$C/ext.cnf" 2>/dev/null
+T=$(newroot t46-down)
+mkdir -p "$T/root/covers"
+HPORT=$((18000 + RANDOM % 1900))
+python3 tests/odd_http_server.py $HPORT bigchunk 2>"$T/plain.txt" &
+p1=$!
+python3 tests/odd_http_server.py $((HPORT + 1)) downgrade "$C/srv.pem" "$C/srv.key" "http://127.0.0.1:$HPORT/big.png" 2>"$T/tls.txt" &
+p2=$!
+sleep 0.6
+printf 'Atari2600/Down.png\thttps://localhost:%s/down.png\n' $((HPORT + 1)) >"$T/root/covers/wanted.txt"
+STELLAPS5_EXTRA_CA=$C/ca.pem STELLAPS5_ROOT=$T/root ASAN_OPTIONS=detect_leaks=0 timeout 6 "$HELPER" >"$T/helper.txt" 2>&1
+kill $p1 $p2 2>/dev/null; wait $p1 $p2 2>/dev/null
+stop_helpers
+H="$T/root/logs/helper.log"
+expect "grep -q 'GET /down.png' $T/tls.txt && grep -q 'from HTTPS to plain HTTP: not followed' $H && ! grep -q 'GET' $T/plain.txt" "a redirect from https:// to http://: not followed, the plain server never asked"
+expect "! grep -q 'runtime error\|AddressSanitizer' $T/helper.txt" "no sanitizer reports"
+# e. the shelf when the system refuses every new thread: it draws, and a game starts (its render pool counted threads
+# that never started and waited for them for ever)
+T=$(newroot t46-nothreads)
+mkdir -p "$T/root/roms/Atari2600"
+$ROM "$T/root/roms/Atari2600/test.a26" >/dev/null
+rc=$(STELLAPS5_HOST_NO_THREADS=1 MAXFLIPS=600 run "$T" "0:0;60:$CROSS;62:0;$(QUITAT 200)" "")
+expect "[ $rc = 0 ] && grep -q 'running \"test\" (Atari 2600)' $T/root/logs/boot.log" "no threads at all: the shelf works and the game starts (exit $rc)"
+# f. the crash report with rbp holding no frame (-O3 code): the stack scan first, the report whole
+T=$(newroot t46-crash)
+STELLAPS5_HOST_CRASH_HANDLER=1 STELLAPS5_HOST_CRASH_TEST=1 STELLAPS5_ROOT=$T/root STELLAPS5_HOMEBREW=$T/homebrew \
+	ASAN_OPTIONS=detect_leaks=0:handle_segv=0:allow_user_segv_handler=1 timeout 30 "$BIN" >"$T/out.txt" 2>&1
+rc=$?
+B=$T/root/logs/boot.log
+expect "[ $rc = 1 ] && grep -q '== CRASH ==' $B && grep -q 'signal 11 (SIGSEGV)' $B && grep -q 'stage\[boot\] = crash test' $B && grep -q '== END CRASH ==' $B" "a fault with a garbage rbp: the crash report is written whole (exit $rc)"
 fi
 
 echo
