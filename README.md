@@ -41,8 +41,9 @@ drives the cores through their libretro interface and plays the part RetroArch p
 > with the PS5 calls simulated: test programs written for this port (a 2600 game that shows on screen which inputs
 > and switches it sees, a 5200, a 7800 and a Lynx program) are played through the whole chain -- the shelf, the pad,
 > the core, the video and sound output --, from zips, `.7z` archives and a simulated network share. **1.0 ran on a
-> PS5** (the shelf, the covers, the menus) **but crashed starting a game**; 1.0.1 fixes that and has not been run on a
-> console yet (see [Known limitations](#known-limitations) for what only a console can confirm). If something
+> PS5** (the shelf, the covers, the menus) **but crashed starting a game**; **with 1.0.1 a 2600 game (River Raid) starts
+> and plays on a PS5** (tested by the author before release). See [Known limitations](#known-limitations) for what
+> hasn't been tried on a console yet. If something
 > fails, the logs in `/data/stella/logs/` say where.
 
 ## How it works
@@ -495,8 +496,8 @@ block is written at the end of `boot.log` (the signal, the stage each part was i
 
 ## Known limitations
 
-- **1.0.1 not run on a PS5 yet** (1.0 ran: its shelf, covers and menus worked; its games crashed at the start, fixed
-  here). Everything above is tested on Linux with the PS5's calls simulated. Only a console can confirm: that the app starts, draws and sounds right at full speed (the PS5 build is `-O3` with the same code), the
+- **Tried on a PS5 so far:** 1.0's shelf, covers and menus; with 1.0.1, a 2600 game starting and playing (1.0's games
+  crashed at the start, fixed here). Everything else is tested on Linux with the PS5's calls simulated. Only a console can confirm: that the app starts, draws and sounds right at full speed (the PS5 build is `-O3` with the same code), the
   controller's feel (the 5200 stick's range and deadzone on a DualSense, the switches), real games and real BIOS files
   (Stella's database and detection on real cartridges, the 5200 games the built-in BIOS can't run, Gearlynx with a real
   `lynxboot.img` and real `.lnx` games, their rotation), the ShadowMount+ part (the mount table, read by the helper;
