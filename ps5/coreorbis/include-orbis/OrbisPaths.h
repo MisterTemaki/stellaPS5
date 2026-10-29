@@ -2,7 +2,8 @@
 //
 //   /data/stella/roms         games, in a folder per system: Atari2600 (.a26 .bin .rom), Atari5200 (.a52 .bin),
 //                             Atari7800 (.a78 .bin), AtariLynx (.lnx .lyx .o); also in .zip or .7z; sub-folders are fine
-//   /data/stella/bios         5200.rom (optional), 7800 BIOS (U).rom (optional), lynxboot.img (needed for Lynx games)
+//   /data/stella/bios         5200.rom (optional), lynxboot.img (needed for Lynx games); no 7800 BIOS (ProSystem gets a
+//                             folder of its own, <root>/cores/prosystem, so it never loads one: fe_emu.cpp)
 //   /data/stella/states       save states, <game>.state1 .. <game>.state10
 //   /data/stella/covers       box art (downloaded, or your own <ROM file name>.png), crc-cache.txt, wanted.txt
 //   /data/stella/logs         boot.log (this run) and boot.prev.log (the run before); installer.log, helper.log
@@ -45,7 +46,7 @@ bool OrbisMkdirs(const std::string& path);
 void OrbisLogOpen(const char* name = "boot");
 void OrbisLog(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 void OrbisLogClose();
-// Debug logs on or off: the "Debug logs" setting (debug_logs= in stella-ps5.ini, on unless it says 0).
+// Debug logs on or off: the "Debug logs" setting (debug_logs= in stella-ps5.ini, off unless it says 1).
 // OrbisLogOpen reads it, so the app, the installer and the helper all follow it; while off, OrbisLog writes
 // nothing (no file, no stdout) and the log files of earlier runs are left as they are.
 void OrbisLogSetEnabled(bool on);
