@@ -135,10 +135,25 @@ void Handler(int sig, siginfo_t* info, void* ctx)
 		EmitLine(buf);
 	}
 
-	// Frame-pointer walk, then a raw scan, each address as anchor+off so it maps into the pie ELF.
+	// The raw scan of the stack first, then the frame-pointer walk (Stella PS5 1.0.2: the other way round before). The
+	// eboot is built with -O3, which leaves out frame pointers: rbp then holds anything, and following it can fault in
+	// here -- which ends the process (above) before the scan, the part that names the functions, was written. The walk
+	// also keeps to the stack now: from rsp up, at most 8 MiB (the frontend's thread has the biggest stack).
 	EmitLine("backtrace (ret = anchor + off):");
+	if (rsp >= 0x10000 && (rsp & 7) == 0)
+	{
+		const uintptr_t* sp = reinterpret_cast<const uintptr_t*>(rsp);
+		for (int i = 0, shown = 0; i < 256 && shown < 24; i++)
+			if (PlausibleText(sp[i]) && anchor)
+			{
+				snprintf(buf, sizeof(buf), "  st[%-3d] =%#lx  off=%+ld", i, (unsigned long)sp[i], long(sp[i] - anchor));
+				EmitLine(buf);
+				shown++;
+			}
+	}
+	constexpr uintptr_t kStackSpan = 8u << 20;
 	uintptr_t fp = rbp;
-	for (int i = 0; i < 24 && fp >= 0x10000 && (fp & 7) == 0; i++)
+	for (int i = 0; i < 24 && rsp >= 0x10000 && fp >= rsp && fp - rsp < kStackSpan && (fp & 7) == 0; i++)
 	{
 		const uintptr_t* f = reinterpret_cast<const uintptr_t*>(fp);
 		const uintptr_t ret = f[1];
@@ -151,17 +166,6 @@ void Handler(int sig, siginfo_t* info, void* ctx)
 		if (next <= fp)
 			break;
 		fp = next;
-	}
-	if (rsp >= 0x10000 && (rsp & 7) == 0)
-	{
-		const uintptr_t* sp = reinterpret_cast<const uintptr_t*>(rsp);
-		for (int i = 0, shown = 0; i < 256 && shown < 24; i++)
-			if (PlausibleText(sp[i]) && anchor)
-			{
-				snprintf(buf, sizeof(buf), "  st[%-3d] =%#lx  off=%+ld", i, (unsigned long)sp[i], long(sp[i] - anchor));
-				EmitLine(buf);
-				shown++;
-			}
 	}
 	EmitLine("== END CRASH ===================================================");
 	EmitLine("");
@@ -211,24 +215,29 @@ void Install()
 	signal(SIGPIPE, SIG_IGN);
 
 	// On the host the sanitizer owns the signal handlers and its own alternate stacks; leave them be (the
-	// stage markers above still work, and ASan reports faults). Arm our handler only on the console.
+	// stage markers above still work, and ASan reports faults). Arm our handler only on the console -- and on the host
+	// when a test asks for it (STELLAPS5_HOST_CRASH_HANDLER=1, with ASAN_OPTIONS=handle_segv=0).
 #if !defined(__linux__)
-	stack_t ss = {};
-	ss.ss_sp = g_sigstack;
-	ss.ss_size = sizeof(g_sigstack);
-	ss.ss_flags = 0;
-	sigaltstack(&ss, nullptr);
-
-	struct sigaction sa = {};
-	sa.sa_sigaction = Handler;
-	sigemptyset(&sa.sa_mask);
-	sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
-	for (int sig : {SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT, SIGTRAP, SIGSYS})
-		sigaction(sig, &sa, nullptr);
+	const bool arm = true;
 #else
-	(void)g_sigstack;
-	(void)&Handler;
+	const char* host_arm = getenv("STELLAPS5_HOST_CRASH_HANDLER");
+	const bool arm = host_arm && *host_arm == '1';
 #endif
+	if (arm)
+	{
+		stack_t ss = {};
+		ss.ss_sp = g_sigstack;
+		ss.ss_size = sizeof(g_sigstack);
+		ss.ss_flags = 0;
+		sigaltstack(&ss, nullptr);
+
+		struct sigaction sa = {};
+		sa.sa_sigaction = Handler;
+		sigemptyset(&sa.sa_mask);
+		sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+		for (int sig : {SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT, SIGTRAP, SIGSYS})
+			sigaction(sig, &sa, nullptr);
+	}
 }
 
 void Stage(Area area, const char* where)

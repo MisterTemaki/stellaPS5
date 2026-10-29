@@ -143,6 +143,15 @@ INCS := -Inetfs -Icoreorbis/include-orbis -Icoreorbis/orbis-shims -Ifrontend -is
 	-isystem $(ROOT)/ps5/third_party/zlib
 DEFS := -DSTELLAPS5_VERSION='"$(VERSION)"' -DSTELLAPS5_CORE_VERSION='"$(CORE_VERSION)"' -DSTELLAPS5_TITLE_ID='"$(TITLE_ID)"' \
 	-DSTELLAPS5_UPDATE_REPO='"$(UPDATE_REPO)"'
+# Stella PS5 1.0.2: every object built with DEFS depends on this file, which changes only when one of those values
+# changes. Before, a new VERSION (or TITLE_ID, UPDATE_REPO) rebuilt nothing: a release built over an earlier build kept
+# the old version in the eboot and the payloads (the updater's checks, "Stella PS5 x installed", the check after an
+# update). The file is written while the Makefile is read (by make -n too), and only when its text differs.
+DEFS_STAMP := build/defs.stamp
+DEFS_TEXT := $(VERSION) $(CORE_VERSION) $(TITLE_ID) $(UPDATE_REPO)
+ifneq ($(shell cat $(DEFS_STAMP) 2>/dev/null),$(DEFS_TEXT))
+$(shell mkdir -p build && printf '%s\n' '$(DEFS_TEXT)' >$(DEFS_STAMP))
+endif
 MINIZIP_FLAGS := -DNOUNCRYPT -I$(ROOT)/ps5/third_party/zlib -w
 PORT_WARN := -Wall -Wextra -Werror -Wno-unused-parameter -Wno-missing-field-initializers
 
@@ -220,11 +229,11 @@ $(PS5_OUT)/port/%.o: %.c
 BRIDGE_WARN := -Wall -Wno-unused-parameter -Wno-unused-variable -Wno-unused-function -Wno-sign-compare
 # Stella's libretro entry points become st_retro_* (frontend/fe_retro_prefix.h, fe_cores.h)
 BRIDGE_PREFIX := -include frontend/fe_retro_prefix.h -DFE_RETRO_PREFIX=st_
-$(PS5_OUT)/bridge/%.o: %.cxx frontend/fe_stella.h frontend/fe_retro_prefix.h $(ROOT)/src/os/libretro/libretro.cxx
+$(PS5_OUT)/bridge/%.o: %.cxx frontend/fe_stella.h frontend/fe_retro_prefix.h $(ROOT)/src/os/libretro/libretro.cxx $(DEFS_STAMP)
 	@mkdir -p $(dir $@)
 	$(PS5_CXX) $(CORE_CXXFLAGS) $(PS5_OPT) $(CORE_DEFS) $(CORE_INCS) $(DEFS) -Ifrontend $(BRIDGE_WARN) $(BRIDGE_PREFIX) -c -o $@ $<
 
-$(PS5_OUT)/port/%.o: %.cpp coreorbis/include-orbis/*.h coreorbis/orbis-shims/*.h frontend/*.h netfs/*.h
+$(PS5_OUT)/port/%.o: %.cpp coreorbis/include-orbis/*.h coreorbis/orbis-shims/*.h frontend/*.h netfs/*.h $(DEFS_STAMP)
 	@mkdir -p $(dir $@)
 	$(PS5_CXX) -std=c++17 $(PS5_OPT) $(DEFS) $(INCS) $(PORT_WARN) $(EXTRA_FLAGS) -c -o $@ $<
 
@@ -242,7 +251,7 @@ $(PS5_OUT)/lzma7z/%.o: $(LZMA7Z)/%.c $(wildcard $(LZMA7Z)/*.h)
 $(PS5_OUT)/lzma7z/names.ok: $(PS5_LZMA7Z_OBJ)
 	$(call LZMA7Z_NAMES_CHECK,$(PS5_PAYLOAD_SDK)/bin/llvm-nm,$^)
 
-$(PS5_OUT)/port/installer/helper_main.o: installer/installer_main.cpp coreorbis/include-orbis/*.h coreorbis/orbis-shims/*.h
+$(PS5_OUT)/port/installer/helper_main.o: installer/installer_main.cpp coreorbis/include-orbis/*.h coreorbis/orbis-shims/*.h $(DEFS_STAMP)
 	@mkdir -p $(dir $@)
 	$(PS5_CXX) -std=c++17 $(PS5_OPT) $(DEFS) $(INCS) $(PORT_WARN) $(EXTRA_FLAGS) -c -o $@ $<
 
@@ -250,7 +259,8 @@ $(PS5_OUT)/port/installer/helper_main.o: installer/installer_main.cpp coreorbis/
 $(PS5_OUT)/StellaPS5-helper.elf: $(PS5_HELPER_OBJ)
 	$(PS5_CXX) -o $@ $^ $(PS5_PAYLOAD_LIBS)
 
-$(PS5_OUT)/helper_data.o: coreorbis/orbis-shims/helper_data.cpp coreorbis/orbis-shims/ProsperoJailbreak.h $(PS5_OUT)/StellaPS5-helper.elf
+$(PS5_OUT)/helper_data.o: coreorbis/orbis-shims/helper_data.cpp coreorbis/orbis-shims/ProsperoJailbreak.h $(PS5_OUT)/StellaPS5-helper.elf \
+		$(DEFS_STAMP)
 	$(PS5_CXX) -std=c++17 $(PS5_OPT) $(DEFS) $(INCS) $(PORT_WARN) -DHELPER_ELF='"$(abspath $(PS5_OUT)/StellaPS5-helper.elf)"' -c -o $@ $<
 
 # 3. the installer + helper, with the app folder built in
@@ -267,7 +277,7 @@ APP_DATA_DEFS = -DAPP_EBOOT='"$(abspath $(APP_OUT)/eboot.bin)"' -DAPP_PARAM='"$(
 	-DAPP_COPYING='"$(abspath $(APP_OUT)/licenses/COPYING.txt)"' -DAPP_LGPL='"$(abspath $(APP_OUT)/licenses/LGPL-2.1.txt)"' \
 	-DAPP_NOTICES='"$(abspath $(APP_OUT)/licenses/NOTICES.txt)"'
 
-$(PS5_OUT)/install_data.o: coreorbis/orbis-shims/install_data.cpp coreorbis/orbis-shims/ProsperoInstall.h $(APP_FILES)
+$(PS5_OUT)/install_data.o: coreorbis/orbis-shims/install_data.cpp coreorbis/orbis-shims/ProsperoInstall.h $(APP_FILES) $(DEFS_STAMP)
 	$(PS5_CXX) -std=c++17 $(PS5_OPT) $(DEFS) $(INCS) $(PORT_WARN) $(APP_DATA_DEFS) -c -o $@ $<
 
 $(PS5_OUT)/StellaPS5.elf: $(PS5_INSTALLER_OBJ) $(PS5_OUT)/install_data.o
@@ -340,9 +350,14 @@ $(APP_OUT)/sce_module/libc.prx: build/app/libc.prx
 
 app: $(APP_FILES)
 
+# app_cpp_runtime.cpp (operator new / delete) with exceptions (Stella PS5 1.0.2): a failed allocation throws
+# std::bad_alloc, as the C++ standard says, instead of stopping the app (SIGILL) -- the eboot's C++ runtime is whole
+# since 1.0.1, so the throw is caught where the code expects it (Stella's state loading, for one)
+APP_CRT_EH_app_crt := -fno-exceptions
+APP_CRT_EH_app_cpp_runtime := -fexceptions
 build/app/app_crt.o build/app/app_cpp_runtime.o: build/app/%.o: $(NATIVE)/tooling/native/%.cpp
 	@mkdir -p $(dir $@)
-	$(NATIVE_CLANG) -std=c++20 -O2 -Wall -Wextra -fno-exceptions -fno-rtti -ffunction-sections -fdata-sections \
+	$(NATIVE_CLANG) -std=c++20 -O2 -Wall -Wextra $(APP_CRT_EH_$*) -fno-rtti -ffunction-sections -fdata-sections \
 		-c -o $@ $<
 
 EBOOT_OBJS = build/app/app_crt.o build/app/app_cpp_runtime.o $(PS5_CORE_OBJ) $(PS5_CORES_OBJ) $(PS5_EMU_OBJ) $(PS5_LIBSMB2_OBJ) $(PS5_LIBNFS_OBJ) \
@@ -447,11 +462,11 @@ $(HOST_OUT)/port/%.o: %.c
 	@mkdir -p $(dir $@)
 	$(HOST_CC) $(HOST_OPT) $(MINIZIP_FLAGS) -c -o $@ $<
 
-$(HOST_OUT)/bridge/%.o: %.cxx frontend/fe_stella.h frontend/fe_retro_prefix.h $(ROOT)/src/os/libretro/libretro.cxx
+$(HOST_OUT)/bridge/%.o: %.cxx frontend/fe_stella.h frontend/fe_retro_prefix.h $(ROOT)/src/os/libretro/libretro.cxx $(DEFS_STAMP)
 	@mkdir -p $(dir $@)
 	$(HOST_CXX) $(CORE_CXXFLAGS) -fPIC $(HOST_CORE_OPT) $(HOST_CORE_SAN) $(CORE_DEFS) $(CORE_INCS) $(DEFS) -Ifrontend $(BRIDGE_WARN) $(BRIDGE_PREFIX) -c -o $@ $<
 
-$(HOST_OUT)/port/%.o: %.cpp coreorbis/include-orbis/*.h coreorbis/orbis-shims/*.h frontend/*.h netfs/*.h
+$(HOST_OUT)/port/%.o: %.cpp coreorbis/include-orbis/*.h coreorbis/orbis-shims/*.h frontend/*.h netfs/*.h $(DEFS_STAMP)
 	@mkdir -p $(dir $@)
 	$(HOST_CXX) -std=c++17 $(HOST_OPT) $(HOST_SAN) $(DEFS) $(INCS) $(PORT_WARN) $(EXTRA_FLAGS) -c -o $@ $<
 
@@ -470,7 +485,7 @@ $(HOST_OUT)/lzma7z/%.o: $(LZMA7Z)/%.c $(wildcard $(LZMA7Z)/*.h)
 $(HOST_OUT)/lzma7z/names.ok: $(HOST_LZMA7Z_OBJ)
 	$(call LZMA7Z_NAMES_CHECK,nm,$^)
 
-$(HOST_OUT)/port/installer/helper_main.o: installer/installer_main.cpp coreorbis/include-orbis/*.h coreorbis/orbis-shims/*.h
+$(HOST_OUT)/port/installer/helper_main.o: installer/installer_main.cpp coreorbis/include-orbis/*.h coreorbis/orbis-shims/*.h $(DEFS_STAMP)
 	@mkdir -p $(dir $@)
 	$(HOST_CXX) -std=c++17 $(HOST_OPT) $(HOST_SAN) $(DEFS) $(INCS) $(PORT_WARN) $(EXTRA_FLAGS) -c -o $@ $<
 
@@ -485,11 +500,12 @@ HOST_APP_DEFS = -DAPP_EBOOT='"$(abspath tests/fake-eboot.bin)"' -DAPP_PARAM='"$(
 
 $(HOST_OUT)/install_data.o: coreorbis/orbis-shims/install_data.cpp coreorbis/orbis-shims/ProsperoInstall.h \
 		tests/fake-eboot.bin tests/fake-libc.prx app/sce_sys/param.json app/sce_sys/icon0.png app/sce_sys/pic0.dds app/sce_sys/pic1.dds \
-		$(addprefix app/licenses/,$(LICENSE_FILES))
+		$(addprefix app/licenses/,$(LICENSE_FILES)) $(DEFS_STAMP)
 	@mkdir -p $(dir $@)
 	$(HOST_CXX) -std=c++17 $(HOST_OPT) $(DEFS) $(INCS) $(PORT_WARN) $(HOST_APP_DEFS) -c -o $@ $<
 
-$(HOST_OUT)/helper_data.o: coreorbis/orbis-shims/helper_data.cpp coreorbis/orbis-shims/ProsperoJailbreak.h $(HOST_OUT)/stella-ps5-helper
+$(HOST_OUT)/helper_data.o: coreorbis/orbis-shims/helper_data.cpp coreorbis/orbis-shims/ProsperoJailbreak.h $(HOST_OUT)/stella-ps5-helper \
+		$(DEFS_STAMP)
 	@mkdir -p $(dir $@)
 	$(HOST_CXX) -std=c++17 $(HOST_OPT) $(DEFS) $(INCS) $(PORT_WARN) -DHELPER_ELF='"$(abspath $(HOST_OUT)/stella-ps5-helper)"' -c -o $@ $<
 

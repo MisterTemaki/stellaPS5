@@ -35,6 +35,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <new>
 #include <pthread.h>
 #include <stdexcept>
 #include <string>
@@ -196,7 +197,8 @@ void AutoCheckUpdates()
 // Stella PS5 1.0.1: C++ exceptions checked at the start, with the debug logs on: one throw from our code and one from
 // inside libc++ (std::stoi), each caught by type. 1.0's eboot took the personality routine and the type_info vtables
 // from the system's libSceLibcInternal next to its own static unwinder, and the first throw (Stella's, when a 2600 game
-// started) crashed; boot.log says "exceptions: ok" when they work (a crash here names this stage).
+// started) crashed; boot.log says "exceptions: ok" when they work (a crash here names this stage). 1.0.2: and a failed
+// allocation's std::bad_alloc.
 __attribute__((noinline)) int ThrowForSelfTest(int v)
 {
 	if (v > 0)
@@ -230,9 +232,40 @@ void ExceptionSelfTest()
 	{
 		libcxx = true;
 	}
-	OrbisLog("[boot] exceptions: %s (our throw %s, libc++'s std::invalid_argument %s)", ours && libcxx ? "ok" : "NOT OK",
-		ours ? "caught" : "missed", libcxx ? "caught" : "missed");
+	// Stella PS5 1.0.2: an allocation that fails throws std::bad_alloc (proto/native/tooling/native/app_cpp_runtime.cpp;
+	// 1.0.1's operator new stopped the app with SIGILL instead). The console's build only: the host's operator new is the
+	// system's, and its sanitizer stops the test at a request this big.
+	bool oom = true;
+	const char* oom_how = "not tried on the host";
+#ifdef __PROSPERO__
+	oom = false;
+	oom_how = "missed";
+	try
+	{
+		volatile size_t huge = size_t(1) << 46; // 64 TiB: no allocator gives that
+		void* p = ::operator new(huge);
+		::operator delete(p);
+	}
+	catch (const std::bad_alloc&)
+	{
+		oom = true;
+		oom_how = "caught";
+	}
+#endif
+	OrbisLog("[boot] exceptions: %s (our throw %s, libc++'s std::invalid_argument %s, operator new's std::bad_alloc %s)",
+		ours && libcxx && oom ? "ok" : "NOT OK", ours ? "caught" : "missed", libcxx ? "caught" : "missed", oom_how);
 }
+
+#ifndef __PROSPERO__
+// The host tests (STELLAPS5_HOST_CRASH_TEST=1): a fault with rbp holding no frame, as -O3 code leaves it, so the crash
+// report is checked where a frame-pointer walk would fault (ProsperoCrash.cpp)
+[[noreturn]] __attribute__((noinline)) void CrashForTest()
+{
+	STELLAPS5_STAGE(Boot, "crash test");
+	__asm__ volatile("movabsq $0x00007f00deadbee8, %rbp\n\tmovq (%rbp), %rax");
+	__builtin_unreachable();
+}
+#endif
 
 int Run(int argc, char** argv)
 {
@@ -253,6 +286,10 @@ int Run(int argc, char** argv)
 	OrbisLog("[boot] jailbreak: %s", freed ? how.c_str() : "nobody answered");
 	const bool have_data = OrbisPathsInit();
 	OrbisLogOpen(); // also writes the lines above
+#ifndef __PROSPERO__
+	if (const char* e = getenv("STELLAPS5_HOST_CRASH_TEST"); e && *e == '1')
+		CrashForTest();
+#endif
 	ExceptionSelfTest();
 	fe::SavePrefetched(prefetch);
 	fe::RememberPrefetch(prefetch);
