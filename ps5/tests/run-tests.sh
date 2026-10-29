@@ -2128,6 +2128,13 @@ if [ -d "$SDKLIB" ] && command -v ld.lld >/dev/null && command -v clang >/dev/nu
 	python3 tools/check_imports.py "$WORK/imp/cxx.elf" "$SDKLIB" >"$WORK/imp/cxx.txt" 2>&1
 	rc=$?
 	expect "[ $rc = 1 ] && grep -q 'import __gxx_personality_v0: the C++ runtime .* must be the eboot.s own' $WORK/imp/cxx.txt" "a PIE importing the C++ personality routine from the system: refused"
+	# (1.0.2) __dynamic_cast, a C++ ABI name outside the __cxa_ / _Z prefixes that the system exports too
+	printf 'extern char __dynamic_cast;\nvoid* p = &__dynamic_cast;\nint _start(void) { return p != 0; }\n' >"$WORK/imp/dyn.c"
+	clang -fPIC -c -o "$WORK/imp/dyn.o" "$WORK/imp/dyn.c" &&
+		ld.lld -pie --no-dynamic-linker -e _start -o "$WORK/imp/dyn.elf" "$WORK/imp/dyn.o" --as-needed "$SDKLIB/libkernel.so" "$SDKLIB/libSceLibcInternal.so"
+	python3 tools/check_imports.py "$WORK/imp/dyn.elf" "$SDKLIB" >"$WORK/imp/dyn.txt" 2>&1
+	rc=$?
+	expect "[ $rc = 1 ] && grep -q 'import __dynamic_cast: the C++ runtime .* must be the eboot.s own' $WORK/imp/dyn.txt" "a PIE importing __dynamic_cast from the system: refused"
 	make -s --eval 'print-app-stubs: ; @echo $(APP_STUBS)' print-app-stubs >"$WORK/imp/stubs.txt" 2>&1
 	expect "grep -q '/libkernel.so' $WORK/imp/stubs.txt && ! grep -q 'libkernel_sys\|libkernel_web' $WORK/imp/stubs.txt" "the app's link takes no libkernel_sys / libkernel_web stub (such a symbol doesn't link at all)"
 else

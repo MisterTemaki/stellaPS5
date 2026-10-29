@@ -36,7 +36,7 @@ see [License and credits](#license-and-credits)) and **five small changes** to S
 drives the cores through their libretro interface and plays the part RetroArch plays on a PC.
 
 > **Status (1.0.2):** builds with the ps5-payload-dev SDK into a signed native app (`eboot.bin`) and its payload, and
-> passes 587 host tests (with netfs's 235 checks, the 7z reader's 43, the NFS backend's and the tabs' unit tests), which
+> passes 588 host tests (with netfs's 235 checks, the 7z reader's 43, the NFS backend's and the tabs' unit tests), which
 > run the same code -- the four cores included -- on Linux
 > with the PS5 calls simulated: test programs written for this port (a 2600 game that shows on screen which inputs
 > and switches it sees, a 5200, a 7800 and a Lynx program) are played through the whole chain -- the shelf, the pad,
@@ -535,7 +535,7 @@ make ps5 -j$(nproc)              # build/ps5/StellaPS5.elf (installer + helper, 
 make send PS5_HOST=192.168.0.10  # sends it to elfldr (port 9021)
 make dist                        # build/dist/StellaPS5-v<version>.elf, StellaPS5-v<version>-PPSA99927.zip, the source zip
 make app                         # only build/app/PPSA99927/, to copy by hand
-make test                        # Linux builds (app, installer, helper) + the 587 host tests (ASan/UBSan), with netfs's,
+make test                        # Linux builds (app, installer, helper) + the 588 host tests (ASan/UBSan), with netfs's,
                                  # the NFS backend's, the tabs' and the 7z reader's unit tests
 ```
 
