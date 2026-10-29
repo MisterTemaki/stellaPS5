@@ -5,7 +5,8 @@
 // does its own: plain sockets, the address from getaddrinfo (then libSceNet's resolver, then GitHub's published
 // addresses for raw.githubusercontent.com), TLS 1.2/1.3 from Mbed TLS (third_party/mbedtls, Apache-2.0), the
 // server's certificate checked against Mozilla's CA list (data/cacert.pem, from certifi, MPL-2.0) and its name.
-// HTTP/1.1, with the connection kept between requests, redirects followed, chunked answers read.
+// HTTP/1.1, with the connection kept between requests, redirects followed (never from https:// to http://: Get then
+// answers -4), chunked answers read.
 //
 // SPDX-License-Identifier: MIT
 #pragma once

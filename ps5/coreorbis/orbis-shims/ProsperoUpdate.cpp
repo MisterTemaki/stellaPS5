@@ -429,6 +429,7 @@ void* CheckMain(void*)
 	const int status = g_fetch(url, data, 2u << 20, nullptr);
 	Release r;
 	std::string why;
+	std::function<void(const std::string&)> on_newer;
 	if (status == 404)
 		why = "This version has no releases on GitHub yet.";
 	else if (status != 200)
@@ -450,12 +451,16 @@ void* CheckMain(void*)
 		g_status.size = r.size;
 		g_status.error.clear();
 		g_status.phase = CompareVersions(r.version, g_config.version) > 0 ? Phase::Available : Phase::UpToDate;
-		if (g_status.phase == Phase::Available && g_notify && g_on_newer)
-			g_on_newer(r.version);
+		if (g_status.phase == Phase::Available && g_notify)
+			on_newer = g_on_newer;
 		OrbisLog("[update] newest release %s (%s, %llu bytes, sha-256 %s); this is %s: %s", r.tag.c_str(),
 			r.zip_name.c_str(), (unsigned long long)r.size, r.sha256.empty() ? "not given" : r.sha256.c_str(),
 			g_config.version.c_str(), g_status.phase == Phase::Available ? "newer" : "up to date");
 	}
+	// Stella PS5 1.0.2: told with the lock let go -- the helper's notification waits for the system's toast, and the
+	// app's status requests (GetStatus, same lock) waited with it
+	if (on_newer)
+		on_newer(r.version);
 	return nullptr;
 }
 
@@ -680,10 +685,21 @@ struct JournalEntry
 	std::string old_sha; // the replaced file's SHA-256: tells "already put back" from "lost" when its copy is gone
 };
 
+// The whole file's SHA-256, read in pieces (Stella PS5 1.0.2: through ReadText, it was the SHA-256 of the first MiB
+// only -- ReadText stops there --, so eboot.bin and the backgrounds, which are bigger, were judged by their start). A
+// file that can't be opened has the SHA-256 of no bytes, as before (the journal keeps 64 hex digits per file).
 static std::string FileSha(const std::string& path)
 {
-	const std::string t = ReadText(path);
-	return Sha256Hex(reinterpret_cast<const uint8_t*>(t.data()), t.size());
+	Sha256 s;
+	if (FILE* f = fopen(path.c_str(), "rb"))
+	{
+		uint8_t buf[65536];
+		size_t n;
+		while ((n = fread(buf, 1, sizeof(buf), f)) > 0)
+			s.Add(buf, n);
+		fclose(f);
+	}
+	return s.Hex();
 }
 
 struct Journal
