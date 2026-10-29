@@ -111,7 +111,6 @@ LZMA7Z_SRC := $(sort $(wildcard $(LZMA7Z)/*.c))
 LZMA7Z_DEFS := -DZ7_ST -DZ7_PPMD_SUPPORT -DZ7_EXTRACT_ONLY
 LZMA7Z_FLAGS := $(LZMA7Z_DEFS) -include $(LZMA7Z)/fe7z_names.h -I$(LZMA7Z) -w
 %/port/frontend/fe_7z.o: EXTRA_FLAGS = $(LZMA7Z_DEFS) -isystem $(LZMA7Z)
-%/port/frontend/fe_7z.o: $(LZMA7Z)/fe7z_names.h
 # every global name the decoder's objects define must carry the prefix (a newer SDK may add one: put it in fe7z_names.h)
 define LZMA7Z_NAMES_CHECK
 	@bad=$$($(1) -g --defined-only $(2) | awk 'NF==3 && $$3 !~ /^(fce7z_|__odr_asan\.fce7z_)/ {print $$3}'); \
@@ -124,9 +123,9 @@ EMU_C_SRC := frontend/third_party/unzip.c frontend/third_party/ioapi.c
 # runs (the switches, the controllers, the palette) and of Stella's property database; built as the core is (C++20, its
 # defines and headers)
 BRIDGE_SRC := frontend/fe_stella.cxx
-# the app's build of ProsperoAppPlace.cpp: no statfs / getfsstat (libkernel_sys, which a title can't load: Media Player
-# Classic PS5 1.5's crash at launch, its #3); it asks the helper, whose build reads the mount table
-%/port/coreorbis/orbis-shims/ProsperoAppPlaceApp.o: coreorbis/orbis-shims/ProsperoAppPlace.cpp
+# the app's build of ProsperoAppPlace.cpp (ProsperoAppPlaceApp.cpp includes it): no statfs / getfsstat (libkernel_sys,
+# which a title can't load: Media Player Classic PS5 1.5's crash at launch, its #3); it asks the helper, whose build
+# reads the mount table. (Its dependency on ProsperoAppPlace.cpp: OBJ_DEPS below.)
 # the payloads: the helper, and the installer (= helper + install)
 # (the helper also downloads the covers in the background: fe_coverworker.cpp, with the app's HTTPS code)
 HELPER_SRC := coreorbis/orbis-shims/orbis_paths.cpp coreorbis/orbis-shims/ProsperoNotify.cpp \
@@ -151,22 +150,28 @@ PORT_WARN := -Wall -Wextra -Werror -Wno-unused-parameter -Wno-missing-field-init
 # names the covers); Stella's own property database (src/emucore/DefProps.hxx) is built into fe_stella.o
 GAMEDB_DEFS := -DGAMEDB_TSV='"$(abspath frontend/data/nointro.tsv)"'
 %/port/frontend/fe_games.o: EXTRA_FLAGS = $(GAMEDB_DEFS)
-%/port/frontend/fe_games.o: frontend/data/nointro.tsv
 # stb_image in fe_covers.o has warnings of its own
 %/port/frontend/fe_covers.o: EXTRA_FLAGS = -Wno-error -Wno-sign-compare -Wno-unused-but-set-variable -Wno-implicit-fallthrough
 # the UI fonts (PS5SX2's: PCSX2's Roboto Regular and PromptFont; Font Awesome's brands) built into fe_text.o
 %/port/frontend/fe_text.o: EXTRA_FLAGS = -DFE_FONT_DIR='"$(abspath frontend/assets/fonts)"' -Wno-error -Wno-sign-compare -Wno-unused-function
-%/port/frontend/fe_text.o: frontend/assets/fonts/Roboto-Regular.ttf frontend/assets/fonts/promptfont.otf \
-	frontend/assets/fonts/fa-brands-400.otf
 # the helper's HTTPS client: Mbed TLS's headers, and Mozilla's CA list built in
 %/port/frontend/fe_tlshttp.o: EXTRA_FLAGS = $(MBEDTLS_FLAGS) -DCACERT_PEM='"$(abspath frontend/data/cacert.pem)"'
-%/port/frontend/fe_tlshttp.o: frontend/data/cacert.pem frontend/fe_mbedtls_config.h
 # the helper payload is installer_main.cpp without the install step
 %/port/installer/helper_main.o: EXTRA_FLAGS = -DSTELLAPS5_HELPER_ONLY
 
 # where the objects go
 PS5_OUT := build/ps5
 HOST_OUT := build/host
+# what an object is built from besides its own source, for both builds: explicit targets (a pattern rule without a
+# recipe adds no prerequisite: it cancels the implicit rule instead, and the object wasn't rebuilt when these changed)
+define OBJ_DEPS
+$(PS5_OUT)/port/$(1).o $(HOST_OUT)/port/$(1).o: $(2)
+endef
+$(eval $(call OBJ_DEPS,coreorbis/orbis-shims/ProsperoAppPlaceApp,coreorbis/orbis-shims/ProsperoAppPlace.cpp))
+$(eval $(call OBJ_DEPS,frontend/fe_games,frontend/data/nointro.tsv))
+$(eval $(call OBJ_DEPS,frontend/fe_text,frontend/assets/fonts/Roboto-Regular.ttf frontend/assets/fonts/promptfont.otf frontend/assets/fonts/fa-brands-400.otf))
+$(eval $(call OBJ_DEPS,frontend/fe_7z,$(LZMA7Z)/fe7z_names.h))
+$(eval $(call OBJ_DEPS,frontend/fe_tlshttp,frontend/data/cacert.pem frontend/fe_mbedtls_config.h))
 
 # the other systems' cores (5200, 7800, Lynx): their sources, flags and rules
 include cores.mk

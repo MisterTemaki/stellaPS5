@@ -72,7 +72,8 @@ bool WriteAll(int fd, const void* data, size_t size)
 }
 
 // Our helper took the connection and then didn't answer in 5 s (the unlock request): the request for where the app is
-// isn't sent to it as well (the start would wait 5 s more). Cleared when it answers.
+// isn't sent to it as well (the start would wait 5 s more). Cleared as soon as our helper answers a request (the
+// updater's status, polled by Settings): later lookups (before an install) ask it again.
 bool g_helper_silent = false;
 
 // One request to one daemon. 1 = yes, 0 = no answer on that port, -1 = it answered no.
@@ -258,6 +259,12 @@ bool UpdateRequest(const char* what, std::string& reply)
 		got += size_t(n);
 	}
 	close(fd);
+	if (got == sizeof(req) && req.magic == kMagic)
+	{
+		if (g_helper_silent)
+			OrbisLog("[update] the helper answers now: it is asked where the app is again");
+		g_helper_silent = false; // it answers now
+	}
 	if (got != sizeof(req) || req.magic != kMagic || req.ret != 0)
 		return false;
 	req.msg1[sizeof(req.msg1) - 1] = 0;

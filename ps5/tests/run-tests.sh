@@ -1817,6 +1817,32 @@ import re, sys
 lines = open(sys.argv[1]).read().splitlines()
 t = lambda pat: next(float(re.match(r'\\[ *([0-9.]+)\\]', l).group(1)) for l in lines if pat in l)
 sys.exit(0 if t('not asked where the app is') - t('no answer in 5 s') < 1.0 else 1)\" $T/root/logs/boot.log" "l: a helper that never answers the unlock: not asked where the app is (no 5 s more at the start)"
+# ... and one silent at the start that answers later (here: the silent one gone, a helper serving): Settings' status
+# polls are answered, so the lookup before the install asks it again, and the install proceeds
+ver $U 00.900.000; echo "eboot usb old" >$U/eboot.bin; rm -f $U/manifest.sha256 $T/root/update-pending.txt
+python3 -c "
+import socket, sys
+s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(('127.0.0.1', int(sys.argv[1]))); s.listen(8)
+held = []
+while True:
+    c, _ = s.accept(); held.append(c)
+" $STELLAPS5_HELPER_PORT >/dev/null 2>&1 &
+MUTE=$!
+(cd "$SRV" && exec python3 -m http.server $SPORT --bind 127.0.0.1 >/dev/null 2>&1) &
+sleep 0.5
+rm -f $T/root/logs/boot.log $T/root/logs/helper.log
+(
+	for i in $(seq 1 300); do grep -q 'not asked where the app is either' $T/root/logs/boot.log 2>/dev/null && break; sleep 0.1; done
+	kill $MUTE 2>/dev/null; wait $MUTE 2>/dev/null; sleep 0.3
+	helper39 STELLAPS5_HOST_MOUNTS="$MNT"
+	$UPD check 1.0 --until available,failed >/dev/null
+) &
+SWAP=$!
+rc=$(app39k "0:0;30:$TRIANGLE;32:0;40:$UP;42:0;46:$UP;48:0;56:$CROSS;58:0;120:$CIRCLE;122:0;$(SHELFQUIT_AT 200)")
+wait $SWAP
+for i in $(seq 1 100); do grep -q 'installed in' $T/root/logs/helper.log 2>/dev/null && break; sleep 0.1; done
+stop39; cp $T/root/logs/boot.log $T/boot-l3.log; rm -f $T/root/update-pending.txt
+expect "[ $rc = 0 ] && grep -q 'not asked where the app is either' $T/root/logs/boot.log && grep -q 'the helper answers now: it is asked where the app is again' $T/root/logs/boot.log && grep -q '\[update\] (from the helper) $SX/app/PPSA99927 is a nullfs mount of $U' $T/root/logs/boot.log && ! grep -q \"can't be installed here\" $T/root/logs/boot.log && grep -q 'eboot v9.9' $U/eboot.bin" "l: a helper silent at the start that answers later: asked again before the install, which proceeds"
 helper39 STELLAPS5_HOST_MOUNTS="$MNT" STELLAPS5_HOST_HELPER_OLD=2
 rm -f $T/root/logs/boot.log
 rc=$(MAXFLIPS=600 run "$T" "0:0;$(SHELFQUIT_AT 60)" "")
