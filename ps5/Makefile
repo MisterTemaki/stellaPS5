@@ -29,7 +29,7 @@
 PS5_PAYLOAD_SDK ?= /opt/ps5-payload-sdk
 PS5_HOST ?= ps5
 PS5_PORT ?= 9021
-VERSION ?= 1.0.1
+VERSION ?= 1.0.2
 # the Stella release this port is built from (tag 7.0, commit d55b1aec)
 CORE_VERSION := 7.0
 TITLE_ID ?= PPSA99927

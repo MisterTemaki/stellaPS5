@@ -35,7 +35,7 @@ see [License and credits](#license-and-credits)) and **five small changes** to S
 `src/common`) and its libretro port (`src/os/libretro`) are compiled from the port's own source list. The frontend
 drives the cores through their libretro interface and plays the part RetroArch plays on a PC.
 
-> **Status (1.0.1):** builds with the ps5-payload-dev SDK into a signed native app (`eboot.bin`) and its payload, and
+> **Status (1.0.2):** builds with the ps5-payload-dev SDK into a signed native app (`eboot.bin`) and its payload, and
 > passes 575 host tests (with netfs's 235 checks, the 7z reader's 43, the NFS backend's and the tabs' unit tests), which
 > run the same code -- the four cores included -- on Linux
 > with the PS5 calls simulated: test programs written for this port (a 2600 game that shows on screen which inputs
@@ -73,9 +73,21 @@ without touching them.
 
 ## Versions
 
-Every release carries its version in the file name: `StellaPS5-v1.0.1.elf`, `StellaPS5-v1.0.1-PPSA99927.zip` (the
-app folder, for the updater and the homebrew catalog) and `stella-ps5-v1.0.1-src.zip` (`make dist`). In this README,
+Every release carries its version in the file name: `StellaPS5-v1.0.2.elf`, `StellaPS5-v1.0.2-PPSA99927.zip` (the
+app folder, for the updater and the homebrew catalog) and `stella-ps5-v1.0.2-src.zip` (`make dist`). In this README,
 "`StellaPS5.elf`" always means the current release's ELF.
+
+**1.0.2:** fixes from an audit of the whole port (nothing changes in how the app looks or plays). A memory allocation
+that fails now throws C++'s `std::bad_alloc`, which the code that can handle it catches (Stella's state loading among
+it: a damaged state file asking for gigabytes stopped the app with SIGILL; now that state just doesn't load); with the
+debug logs on, `[boot] exceptions: ok` checks it too. A new version number now rebuilds everything that carries it
+(`make` used to keep the old number in objects built before: a release built over an older build could say, after an
+update, that the old version was still running). The helper's HTTPS client: a chunked answer whose chunk size is near
+2^64 is refused at once (the size check wrapped round, and the answer was read past its limit), and a redirect from
+HTTPS down to plain HTTP isn't followed (the updater's checks rest on GitHub's HTTPS answer). The update journal's
+SHA-256 is each file's whole one (it was the first MiB's: a big `eboot.bin` put back could be taken for lost, or the
+other way round). The shelf no longer waits for ever when the system refuses its drawing threads, and the crash
+report in `boot.log` is written whole when the faulting code keeps no frame pointer (the stack is scanned first).
 
 **1.0.1:** **games crashed when they started on the console** (1.0 showed the shelf, but starting a game stopped the
 app: "signal 12 (SIGSYS)" on the screen, a SIGSEGV in `boot.log`). C++ exceptions didn't work in the eboot: it
@@ -178,10 +190,10 @@ translated.
 
 1. **Send `StellaPS5.elf`** with PS5 Payload Manager, or from a PC on the same network:
    ```sh
-   nc -q0 PS5_IP 9021 < StellaPS5-v1.0.1.elf
+   nc -q0 PS5_IP 9021 < StellaPS5-v1.0.2.elf
    ```
    It installs the app in `/data/homebrew/PPSA99927/` (`eboot.bin`, `sce_module/libc.prx`, `param.json`, the icon,
-   the backgrounds and `licenses/`: the GPL, the LGPL 2.1 and `NOTICES.txt`, what is in the app and under which terms), shows **"Stella PS5 1.0.1 installed. Open it from the Stella PS5 icon on the home screen."**
+   the backgrounds and `licenses/`: the GPL, the LGPL 2.1 and `NOTICES.txt`, what is in the app and under which terms), shows **"Stella PS5 1.0.2 installed. Open it from the Stella PS5 icon on the home screen."**
    and stays running as the helper.
 2. **Open the Stella PS5 icon.** The game shelf appears and the controller works.
 3. **Copy your games** to their system's folder, over FTP for example. The app makes the folders on its first start:
@@ -257,7 +269,7 @@ can't come back unnoticed), but only a PS5 can confirm it opens. To put another 
 /data/homebrew/PPSA99927/
   eboot.bin              the four emulators and the frontend (a native app, signed as PS5SX2's is), with the helper inside
   sce_module/libc.prx    the native app's C runtime (the same as PS5SX2's and ps5-native-app-boilerplate's)
-  sce_sys/param.json     title "Stella PS5", ID PPSA99927, version 01.001.000
+  sce_sys/param.json     title "Stella PS5", ID PPSA99927, version 01.002.000
   sce_sys/icon0.png      the icon (512x512)
   sce_sys/pic0.dds       the home-screen background while the icon is selected (3840x2160, BC7)
   sce_sys/pic1.dds       the launch background (the same image)
@@ -497,7 +509,8 @@ block is written at the end of `boot.log` (the signal, the stage each part was i
 ## Known limitations
 
 - **Tried on a PS5 so far:** 1.0's shelf, covers and menus; with 1.0.1, a 2600 game starting and playing (1.0's games
-  crashed at the start, fixed here). Everything else is tested on Linux with the PS5's calls simulated. Only a console can confirm: that the app starts, draws and sounds right at full speed (the PS5 build is `-O3` with the same code), the
+  crashed at the start, fixed here). 1.0.2's fixes are tested on Linux only. Everything else is tested on Linux with the
+  PS5's calls simulated. Only a console can confirm: that the app starts, draws and sounds right at full speed (the PS5 build is `-O3` with the same code), the
   controller's feel (the 5200 stick's range and deadzone on a DualSense, the switches), real games and real BIOS files
   (Stella's database and detection on real cartridges, the 5200 games the built-in BIOS can't run, Gearlynx with a real
   `lynxboot.img` and real `.lnx` games, their rotation), the ShadowMount+ part (the mount table, read by the helper;

@@ -2140,6 +2140,8 @@ echo "== 46. the 1.0.2 audit: the version reaches every object, a failed allocat
 # a. a new VERSION (TITLE_ID, UPDATE_REPO) rebuilds what is built with it; the same one rebuilds nothing
 cp -p build/defs.stamp "$WORK/defs.stamp.keep" 2>/dev/null
 make -n build/host/stella-ps5-host VERSION=9.8.7 >"$WORK/t46-make-new.txt" 2>&1
+# (the dry run rewrote the stamp: put back as it was, or the next build would rebuild all of it once more)
+[ -f "$WORK/defs.stamp.keep" ] && cp -p "$WORK/defs.stamp.keep" build/defs.stamp
 make -n build/host/stella-ps5-host >"$WORK/t46-make-same.txt" 2>&1
 [ -f "$WORK/defs.stamp.keep" ] && cp -p "$WORK/defs.stamp.keep" build/defs.stamp
 expect "grep -q 'main-boot.cpp' $WORK/t46-make-new.txt && grep -q 'installer_main.cpp' $WORK/t46-make-new.txt && grep -q 'fe_shelf.cpp' $WORK/t46-make-new.txt" "a new VERSION: the objects that carry it are built again (make -n)"
