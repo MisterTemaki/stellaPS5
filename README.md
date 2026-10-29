@@ -29,18 +29,20 @@ PS5 and Snes9x PS5, the ports it comes from:
 - `ps5/installer` is the installer and helper payload.
 
 Everything outside `ps5/` is **Stella 7.0** (tag `7.0`, commit `d55b1aec0d067a4c901a6dcdf81cb8f579685659`), as the
-repository's first commit has it, apart from this README (Stella's own is [README-Stella.md](README-Stella.md)) and
-**five small changes** to Stella (three in its libretro port, two in its core), each marked `Stella PS5:` (see [Building](#building)). The emulator (`src/emucore`,
+repository's first commit has it, apart from this README (Stella's own is [README-Stella.md](README-Stella.md)), the
+licence files (`LICENSE` and `COPYING`: the GPL 3; Stella's own `License.txt` and `Copyright.txt` moved to `docs/`,
+see [License and credits](#license-and-credits)) and **five small changes** to Stella (three in its libretro port, two in its core), each marked `Stella PS5:` (see [Building](#building)). The emulator (`src/emucore`,
 `src/common`) and its libretro port (`src/os/libretro`) are compiled from the port's own source list. The frontend
 drives the cores through their libretro interface and plays the part RetroArch plays on a PC.
 
-> **Status (1.0):** builds with the ps5-payload-dev SDK into a signed native app (`eboot.bin`) and its payload, and
+> **Status (1.0.1):** builds with the ps5-payload-dev SDK into a signed native app (`eboot.bin`) and its payload, and
 > passes 575 host tests (with netfs's 235 checks, the 7z reader's 43, the NFS backend's and the tabs' unit tests), which
 > run the same code -- the four cores included -- on Linux
 > with the PS5 calls simulated: test programs written for this port (a 2600 game that shows on screen which inputs
 > and switches it sees, a 5200, a 7800 and a Lynx program) are played through the whole chain -- the shelf, the pad,
-> the core, the video and sound output --, from zips, `.7z` archives and a simulated network share. **It has not been
-> run on a PS5 yet** (see [Known limitations](#known-limitations) for what only a console can confirm). If something
+> the core, the video and sound output --, from zips, `.7z` archives and a simulated network share. **1.0 ran on a
+> PS5** (the shelf, the covers, the menus) **but crashed starting a game**; 1.0.1 fixes that and has not been run on a
+> console yet (see [Known limitations](#known-limitations) for what only a console can confirm). If something
 > fails, the logs in `/data/stella/logs/` say where.
 
 ## How it works
@@ -70,9 +72,20 @@ without touching them.
 
 ## Versions
 
-Every release carries its version in the file name: `StellaPS5-v1.0.elf`, `StellaPS5-v1.0-PPSA99927.zip` (the app
-folder, for the updater and the homebrew catalog) and `stella-ps5-v1.0-src.zip` (`make dist`). In this README,
+Every release carries its version in the file name: `StellaPS5-v1.0.1.elf`, `StellaPS5-v1.0.1-PPSA99927.zip` (the
+app folder, for the updater and the homebrew catalog) and `stella-ps5-v1.0.1-src.zip` (`make dist`). In this README,
 "`StellaPS5.elf`" always means the current release's ELF.
+
+**1.0.1:** **games crashed when they started on the console** (1.0 showed the shelf, but starting a game stopped the
+app: "signal 12 (SIGSYS)" on the screen, a SIGSEGV in `boot.log`). C++ exceptions didn't work in the eboot: it
+took part of the C++ runtime (the routine that finds a `catch`, and the `type_info` tables) from the system and the
+rest (the throw and the unwinder) from its own copy, and the two don't fit; Stella throws and catches twice while it
+loads a 2600 game, and the first throw crashed. Now the whole C++ runtime is the app's own (`tools/check_imports.py`
+stops a build that imports any of it), and those two throws are gone from a game's start. With the debug logs on,
+the app checks a throw and its catch at the start (`boot.log`: `[boot] exceptions: ok`) and logs each step of a
+game's start, put on the disk before it runs; the crash log catches SIGSYS too. The licence: a top-level `LICENSE`
+(the GPL 3), and Stella's own `License.txt` / `Copyright.txt` moved to `docs/`, so GitHub shows the project's licence
+(GPL 3) instead of "Other".
 
 **1.0:** the first release: Stella 7.0 for the 2600 with its palettes, TV effects, phosphor and pixel aspect, the
 console's switches on the pad and in the pause menu; a5200, ProSystem and Gearlynx for the 5200, 7800 and Lynx, in
@@ -164,10 +177,10 @@ translated.
 
 1. **Send `StellaPS5.elf`** with PS5 Payload Manager, or from a PC on the same network:
    ```sh
-   nc -q0 PS5_IP 9021 < StellaPS5-v1.0.elf
+   nc -q0 PS5_IP 9021 < StellaPS5-v1.0.1.elf
    ```
    It installs the app in `/data/homebrew/PPSA99927/` (`eboot.bin`, `sce_module/libc.prx`, `param.json`, the icon,
-   the backgrounds and `licenses/`: the GPL, the LGPL 2.1 and `NOTICES.txt`, what is in the app and under which terms), shows **"Stella PS5 1.0 installed. Open it from the Stella PS5 icon on the home screen."**
+   the backgrounds and `licenses/`: the GPL, the LGPL 2.1 and `NOTICES.txt`, what is in the app and under which terms), shows **"Stella PS5 1.0.1 installed. Open it from the Stella PS5 icon on the home screen."**
    and stays running as the helper.
 2. **Open the Stella PS5 icon.** The game shelf appears and the controller works.
 3. **Copy your games** to their system's folder, over FTP for example. The app makes the folders on its first start:
@@ -243,7 +256,7 @@ can't come back unnoticed), but only a PS5 can confirm it opens. To put another 
 /data/homebrew/PPSA99927/
   eboot.bin              the four emulators and the frontend (a native app, signed as PS5SX2's is), with the helper inside
   sce_module/libc.prx    the native app's C runtime (the same as PS5SX2's and ps5-native-app-boilerplate's)
-  sce_sys/param.json     title "Stella PS5", ID PPSA99927, version 01.000.000
+  sce_sys/param.json     title "Stella PS5", ID PPSA99927, version 01.001.000
   sce_sys/icon0.png      the icon (512x512)
   sce_sys/pic0.dds       the home-screen background while the icon is selected (3840x2160, BC7)
   sce_sys/pic1.dds       the launch background (the same image)
@@ -365,7 +378,7 @@ The switches stay where you put them, as on the console; the pause menu shows wh
 (and has Game Reset and Game Select). The console starts with both difficulties on B and the TV type on colour, as
 Stella sets them (or as its database says for the game).
 
-Only the **joystick** is played with the pad in 1.0. A game that needs **paddles, driving controllers, keypads, a
+Only the **joystick** is played with the pad so far. A game that needs **paddles, driving controllers, keypads, a
 trackball, a mouse or a light gun** (Stella tells from its database and its detection) shows a message naming the
 controller when it starts -- "This game needs paddles, which aren't supported yet." -- and starts all the same.
 
@@ -482,8 +495,8 @@ block is written at the end of `boot.log` (the signal, the stage each part was i
 
 ## Known limitations
 
-- **Not run on a PS5 yet.** Everything above is tested on Linux with the PS5's calls simulated. Only a console can
-  confirm: that the app starts, draws and sounds right at full speed (the PS5 build is `-O3` with the same code), the
+- **1.0.1 not run on a PS5 yet** (1.0 ran: its shelf, covers and menus worked; its games crashed at the start, fixed
+  here). Everything above is tested on Linux with the PS5's calls simulated. Only a console can confirm: that the app starts, draws and sounds right at full speed (the PS5 build is `-O3` with the same code), the
   controller's feel (the 5200 stick's range and deadzone on a DualSense, the switches), real games and real BIOS files
   (Stella's database and detection on real cartridges, the 5200 games the built-in BIOS can't run, Gearlynx with a real
   `lynxboot.img` and real `.lnx` games, their rotation), the ShadowMount+ part (the mount table, read by the helper;
@@ -556,7 +569,8 @@ make test                        # Linux builds (app, installer, helper) + the 5
 
 ## License and credits
 
-The whole is distributed under the **GNU General Public License, version 3 or later** ([COPYING](COPYING)): Stella,
+The whole is distributed under the **GNU General Public License, version 3 or later** ([LICENSE](LICENSE), the same
+text as [COPYING](COPYING)): Stella,
 a5200 and ProSystem are GPL-2.0-or-later and Gearlynx is GPL-3.0-or-later, so the combined program is
 GPL-3.0-or-later. (For a5200 and ProSystem the "or later" rests on their emulator files' own headers, which say
 "version 2 ... or any later version", and on section 9 of the GPL 2 for the files that name no version: their libretro
@@ -564,9 +578,14 @@ glue has no header and their `License.txt` is the bare GPL 2 text; see [the core
 Every binary is distributed with its complete source (`make dist` makes the source zip). The app folder carries the
 licences and notices in `licenses/` (`COPYING.txt`, `LGPL-2.1.txt`, `NOTICES.txt`), and so does the release zip.
 
+Stella's own licence files, `License.txt` (the GPL 2, which Stella's source files refer to) and `Copyright.txt`, are in
+[docs/](docs/) as they are: at the top of the repository GitHub's licence detection (licensee) read them next to
+`LICENSE` / `COPYING` as a second licence (the GPL 2) and an unknown one, and showed "Other"; with only the GPL 3 there
+it shows the project's licence. Stella's desktop install rules (`Makefile`, `debian/docs`) point to the new place.
+
 - **Stella** 7.0 (Bradford W. Mott, Stephen Anthony, Thomas Jentzsch, Christian Speckner, the Stella team and
   contributors, [stella-emu.github.io](https://stella-emu.github.io/), [github.com/stella-emu/stella](https://github.com/stella-emu/stella)):
-  GPL-2.0-or-later (`License.txt`, `Copyright.txt`). Its libretro port is by the Stella team and the libretro
+  GPL-2.0-or-later (`docs/License.txt`, `docs/Copyright.txt`). Its libretro port is by the Stella team and the libretro
   contributors; it includes Blargg's NTSC filter (LGPL-2.1-or-later) and nlohmann/json (MIT).
 - **a5200** (the Atari800 team's emulation, its 5200 port by Alekmaul and the libretro contributors,
   [github.com/libretro/a5200](https://github.com/libretro/a5200)): GPL-2.0-or-later; Altirra's 5200 BIOS replacement

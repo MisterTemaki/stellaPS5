@@ -41,6 +41,9 @@ REP() { local f=$1 n=$2 b=$3 out="" i; for i in $(seq 1 $n); do out="$out;$f:$b;
 ok() { echo "  ok: $*"; PASS=$((PASS + 1)); }
 bad() { echo "  FAIL: $*"; FAIL=$((FAIL + 1)); }
 expect() { if eval "$1"; then ok "$2"; else bad "$2"; fi; }
+# the version being tested (Makefile, app/sce_sys/param.json)
+VER=$(sed -n 's/^VERSION ?= //p' Makefile)
+CVER=$(sed -n 's/.*"contentVersion": "\([0-9.]*\)".*/\1/p' app/sce_sys/param.json)
 want() { [ -z "$ONLY" ] || [[ " $ONLY " == *" $1 "* ]]; }
 
 newroot() {
@@ -1534,24 +1537,24 @@ release() { # tag contentVersion [bad|nodigest]
 	printf '{"tag_name":"%s","name":"Stella PS5 %s","assets":[{"name":"StellaPS5-%s.elf","size":1,"browser_download_url":"http://127.0.0.1:%s/x.elf"},{"name":"StellaPS5-%s-PPSA99927.zip","size":%s,%s"browser_download_url":"http://127.0.0.1:%s/StellaPS5-%s-PPSA99927.zip"}]}' \
 		"$1" "$1" "$1" $SPORT "$1" $size "$digest" $SPORT "$1" >"$SRV/latest.json"
 }
-# the app installed by the payload (1.0), which then stays as the helper; the updater asks the test server
+# the app installed by the payload ($VER), which then stays as the helper; the updater asks the test server
 STELLAPS5_UPDATE_API=http://127.0.0.1:$SPORT/latest.json STELLAPS5_ROOT=$T/root STELLAPS5_HOMEBREW=$T/homebrew STELLAPS5_APPMETA=$T/appmeta \
 	ASAN_OPTIONS=detect_leaks=0 timeout 120 "$INSTALLER" >"$T/inst.txt" 2>&1 &
-expect "waitfor $T/root/logs/installer.log 'listening on 127.0.0.1'" "the payload installed 1.0 and serves as the helper"
-expect "[ \"\$($UPD status 1.0 | cut -d'|' -f1)\" = idle ]" "the updater answers: idle"
+expect "waitfor $T/root/logs/installer.log 'listening on 127.0.0.1'" "the payload installed $VER and serves as the helper"
+expect "[ \"\$($UPD status $VER | cut -d'|' -f1)\" = idle ]" "the updater answers: idle"
 expect "grep -q \"\[update\] the app's folder is $T/homebrew/PPSA99927\" $T/root/logs/installer.log || grep -q '\[update\] .*$T/homebrew/PPSA99927' $T/root/logs/installer.log" "the helper looks up where the app runs from: /data/homebrew (no ShadowMount+ mount)"
-release v1.0 01.000.000
-expect "$UPD check 1.0 --until uptodate,failed | grep -q '^uptodate|1.0|'" "the newest release is this version: up to date"
+release v$VER $CVER
+expect "$UPD check $VER --until uptodate,failed | grep -q '^uptodate|$VER|'" "the newest release is this version: up to date"
 echo gone >"$T/homebrew/PPSA99927/sce_sys/old.bin"
 printf '%s *sce_sys/old.bin\n' "$(sha256sum <"$T/homebrew/PPSA99927/sce_sys/old.bin" | cut -c1-64)" >"$T/homebrew/PPSA99927/manifest.sha256"
 release v9.9 99.000.000 bad
-expect "$UPD check 1.0 --until available,failed | grep -q '^available|9.9|'" "a newer release (9.9): available, with its size"
+expect "$UPD check $VER --until available,failed | grep -q '^available|9.9|'" "a newer release (9.9): available, with its size"
 cp "$T/homebrew/PPSA99927/eboot.bin" "$T/eboot.before"
-expect "$UPD install 1.0 --until done,failed | grep -q \"^failed|.*SHA-256 doesn't match\"" "a download whose SHA-256 isn't GitHub's: refused"
+expect "$UPD install $VER --until done,failed | grep -q \"^failed|.*SHA-256 doesn't match\"" "a download whose SHA-256 isn't GitHub's: refused"
 expect "cmp -s $T/homebrew/PPSA99927/eboot.bin $T/eboot.before && [ -z \"\$(find $T/homebrew -name '*.new')\" ]" "and nothing was changed"
 release v9.9 99.000.000
-expect "$UPD check 1.0 --until available,failed | grep -q '^available|9.9|'" "checked again"
-expect "$UPD install 1.0 --until done,failed | grep -q '^done|9.9|'" "downloaded, every file checked, installed"
+expect "$UPD check $VER --until available,failed | grep -q '^available|9.9|'" "checked again"
+expect "$UPD install $VER --until done,failed | grep -q '^done|9.9|'" "downloaded, every file checked, installed"
 expect "grep -q 'eboot v9.9' $T/homebrew/PPSA99927/eboot.bin && grep -q '\"contentVersion\": \"99.000.000\"' $T/homebrew/PPSA99927/sce_sys/param.json" "the new eboot.bin and param.json in place"
 expect "[ -f $T/homebrew/PPSA99927/sce_sys/extra.bin ] && [ ! -e $T/homebrew/PPSA99927/sce_sys/old.bin ] && grep -q 'sce_sys/extra.bin' $T/homebrew/PPSA99927/manifest.sha256" "a new file added, one the old manifest had removed, the manifest kept"
 expect "tail -n1 $T/homebrew/PPSA99927/licenses/NOTICES.txt | grep -qx 'notices v9.9' && grep -q ' \\*licenses/COPYING.txt\$' $T/homebrew/PPSA99927/manifest.sha256" "the licenses/ folder in the release zip: updated and in the manifest"
@@ -1582,13 +1585,13 @@ expect "grep -q 'update install' $T2/root/logs/installer.log && grep -q 'eboot v
 expect "grep -q 'is available: Settings, SYSTEM, Updates' $T2/inst.txt $T2/root/logs/installer.log" "the daily check found 9.9: a notification says so"
 expect "grep -q \"sceSystemServiceLoadExec($T2/homebrew/PPSA99927/eboot.bin)\" $T2/out.txt && grep -q '^9.9$' $T2/root/update-pending.txt" "Cross on \"Installed: restart\": the app restarts into the new eboot.bin; the next start checks the version"
 nosan "$T2"
-# the start after: still 1.0 although 9.9 was installed (ShadowMount+ still shows the old files): the app says so and
+# the start after: still the old version although 9.9 was installed (ShadowMount+ still shows the old files): the app says so and
 # what to do; a start that runs the version noted: said once, the note gone
 rc=$(run "$T2" "0:0;60:$CROSS;62:0;$(SHELFQUIT_AT 100)" "")
-expect "[ $rc = 0 ] && grep -q \"\[update\] after the update to 9.9 (in $T2/homebrew/PPSA99927): this is 1.0: still the old version\" $T2/root/logs/boot.log && grep -q '\[ui\] message: Stella PS5 9.9 was installed in $T2/homebrew/PPSA99927, but this is still 1.0' $T2/root/logs/boot.log" "the next start: still the old version: the app says so (close it, ShadowMount+ again, or restart)"
-printf '1.0\n/x\n0\n' >$T2/root/update-pending.txt
+expect "[ $rc = 0 ] && grep -q \"\[update\] after the update to 9.9 (in $T2/homebrew/PPSA99927): this is $VER: still the old version\" $T2/root/logs/boot.log && grep -q '\[ui\] message: Stella PS5 9.9 was installed in $T2/homebrew/PPSA99927, but this is still $VER' $T2/root/logs/boot.log" "the next start: still the old version: the app says so (close it, ShadowMount+ again, or restart)"
+printf '%s\n/x\n0\n' $VER >$T2/root/update-pending.txt
 rc=$(run "$T2" "0:0;$(SHELFQUIT_AT 60)" "")
-expect "[ $rc = 0 ] && grep -q 'this is 1.0: the new version runs' $T2/root/logs/boot.log && grep -q 'Stella PS5 updated to 1.0.' $T2/out.txt && [ ! -e $T2/root/update-pending.txt ]" "an update seen running: said once, the note gone"
+expect "[ $rc = 0 ] && grep -q 'this is $VER: the new version runs' $T2/root/logs/boot.log && grep -q 'Stella PS5 updated to $VER.' $T2/out.txt && [ ! -e $T2/root/update-pending.txt ]" "an update seen running: said once, the note gone"
 stop38
 # a release whose zip GitHub gives no SHA-256 for (no "digest"): refused before anything is downloaded (as Media Player
 # Classic PS5 1.5); the app shows why, translated (German here: no text left untranslated)
@@ -1598,9 +1601,9 @@ release v9.9 99.000.000 nodigest
 STELLAPS5_UPDATE_API=http://127.0.0.1:$SPORT/latest.json STELLAPS5_ROOT=$T3/root STELLAPS5_HOMEBREW=$T3/homebrew STELLAPS5_APPMETA=$T3/appmeta \
 	ASAN_OPTIONS=detect_leaks=0 timeout 120 "$INSTALLER" >"$T3/inst.txt" 2>&1 &
 waitfor $T3/root/logs/installer.log 'listening on 127.0.0.1'
-expect "$UPD check 1.0 --until available,failed | grep -q '^available|9.9|'" "a release without a SHA-256 from GitHub: found (9.9)"
-expect "$UPD install 1.0 --until done,failed | grep -q \"^failed|.*GitHub gave no SHA-256 for the download, so it can't be checked: nothing was changed\"" "... refused: GitHub gave no SHA-256, so it can't be checked"
-expect "! grep -q 'downloading http' $T3/root/logs/installer.log && grep -q '\"contentVersion\": \"01.000.000\"' $T3/homebrew/PPSA99927/sce_sys/param.json" "... before anything is downloaded; nothing changed"
+expect "$UPD check $VER --until available,failed | grep -q '^available|9.9|'" "a release without a SHA-256 from GitHub: found (9.9)"
+expect "$UPD install $VER --until done,failed | grep -q \"^failed|.*GitHub gave no SHA-256 for the download, so it can't be checked: nothing was changed\"" "... refused: GitHub gave no SHA-256, so it can't be checked"
+expect "! grep -q 'downloading http' $T3/root/logs/installer.log && grep -q '\"contentVersion\": \"$CVER\"' $T3/homebrew/PPSA99927/sce_sys/param.json" "... before anything is downloaded; nothing changed"
 echo "language=4" >>"$T3/root/stella-ps5.ini"; date +%s >"$T3/root/update-check.txt"
 $ROM "$T3/root/roms/test.a26" >/dev/null
 rc=$(STELLAPS5_HOST_I18N_MISSING=$T3/missing.txt run "$T3" "0:0;30:$TRIANGLE;32:0;40:$UP;42:0;46:$UP;48:0;100:$CIRCLE;102:0;$(SHELFQUIT_AT 140)" "90")
@@ -1638,7 +1641,7 @@ inst39() {
 # mount), not a second one in /data/homebrew
 echo "eboot usb old" >$U/eboot.bin; ver $U 00.900.000
 inst39 inst1 STELLAPS5_HOST_MOUNTS="$MNT"
-expect "grep -q 'updated to 1.0 (in $U, the copy ShadowMount+ runs)' $T/inst1.txt && ! grep -q 'eboot usb old' $U/eboot.bin && grep -q '\"contentVersion\": \"01.000.000\"' $U/sce_sys/param.json && [ ! -e $M/hb2 ]" "the payload: the copy ShadowMount+ runs (a USB folder) updated through the mount, no second copy"
+expect "grep -q 'updated to $VER (in $U, the copy ShadowMount+ runs)' $T/inst1.txt && ! grep -q 'eboot usb old' $U/eboot.bin && grep -q '\"contentVersion\": \"$CVER\"' $U/sce_sys/param.json && [ ! -e $M/hb2 ]" "the payload: the copy ShadowMount+ runs (a USB folder) updated through the mount, no second copy"
 # b. the helper's updates go there too: a release installed through the mount, /data/homebrew's copy untouched
 SRV=$T/srv; mkdir -p $SRV
 SPORT=$((18000 + RANDOM % 1900))
@@ -1657,7 +1660,7 @@ helper39() { # the helper (the payload, the app up to date) with env ($@)
 }
 rm -f $T/root/logs/helper.log
 helper39 STELLAPS5_HOST_MOUNTS="$MNT"
-expect "$UPD check 1.0 --until available,failed | grep -q '^available|9.9|' && $UPD install 1.0 --until done,failed | grep -q '^done|9.9|'" "the helper: 9.9 found, installed"
+expect "$UPD check $VER --until available,failed | grep -q '^available|9.9|' && $UPD install $VER --until done,failed | grep -q '^done|9.9|'" "the helper: 9.9 found, installed"
 expect "grep -q \"$SX/app/PPSA99927 is a nullfs mount of $U (on $M/usb0, exfatfs, from /dev/da0s1): files go through $SX/app/PPSA99927\" $T/root/logs/helper.log" "the app runs from a USB drive's folder (a nullfs mount): found, written through the mount"
 expect "grep -q 'eboot v9.9' $U/eboot.bin && grep -q '\"contentVersion\": \"99.000.000\"' $U/sce_sys/param.json" "... the update is in that folder"
 expect "sums $T/homebrew/PPSA99927 | cmp -s - $T/home.sums" "... /data/homebrew's copy untouched (no second copy written)"
@@ -1666,15 +1669,15 @@ stop39
 # c. from an image ShadowMount+ mounted (read-only): the helper refuses to write it; the app says so before downloading
 I=$M/shadowmnt/img1/PPSA99927
 rm -rf $M/shadowmnt $SX/app/PPSA99927 && mkdir -p $M/shadowmnt/img1 && cp -r $U $I && ln -s $I $SX/app/PPSA99927
-ver $I 01.000.000; sums $I >$T/img.sums
+ver $I $CVER; sums $I >$T/img.sums
 IMNT="$SX/app/PPSA99927|nullfs|$I|rw;$M/shadowmnt/img1|ufs|/dev/lvd2|ro"
 rm -f $T/root/logs/helper.log
 helper39 STELLAPS5_HOST_MOUNTS="$IMNT"
-expect "$UPD check 1.0 --until available,failed | grep -q '^available|9.9|' && $UPD install 1.0 --until done,failed | grep -q '^failed|.*image that ShadowMount+ mounted'" "the helper: an image ShadowMount+ mounted can't take the update: refused"
+expect "$UPD check $VER --until available,failed | grep -q '^available|9.9|' && $UPD install $VER --until done,failed | grep -q '^failed|.*image that ShadowMount+ mounted'" "the helper: an image ShadowMount+ mounted can't take the update: refused"
 expect "sums $I | cmp -s - $T/img.sums && ! grep -q 'GET .*\.zip' $T/root/logs/helper.log" "... nothing downloaded, nothing written"
 $ROM "$T/root/roms/test.a26" >/dev/null
 rc=$(STELLAPS5_HOST_PAD_GATE="55:$T/root/logs/boot.log:the helper's state: available 9.9" STELLAPS5_HOST_REALTIME=1 STELLAPS5_SYSTEM_EX=$SX STELLAPS5_SHADOWMNT=$M/shadowmnt STELLAPS5_USER_APP=$M/userapp STELLAPS5_HOST_MOUNTS="$IMNT" run "$T" "0:0;30:$TRIANGLE;32:0;40:$UP;42:0;46:$UP;48:0;56:$CROSS;58:0;100:$CROSS;102:0;120:$CIRCLE;122:0;$(SHELFQUIT_AT 200)" "90")
-expect "[ $rc = 0 ] && grep -q '\[ui\] message: Stella PS5 9.9 is available (you have 1.0).' $T/root/logs/boot.log && grep -q 'This copy runs from an image that ShadowMount+ mounted ($I)' $T/root/logs/boot.log" "the app: Updates says the image can't take it, before anything is downloaded"
+expect "[ $rc = 0 ] && grep -q '\[ui\] message: Stella PS5 9.9 is available (you have $VER).' $T/root/logs/boot.log && grep -q 'This copy runs from an image that ShadowMount+ mounted ($I)' $T/root/logs/boot.log" "the app: Updates says the image can't take it, before anything is downloaded"
 expect "grep -q '9.9 is available, but it can.t be installed here' $T/root/logs/boot.log && sums $I | cmp -s - $T/img.sums" "... and nothing was written"
 nosan "$T"
 cp $T/root/logs/boot.log $T/boot-c.log; cp $T/out.txt $T/out-c.txt
@@ -1683,10 +1686,10 @@ stop39
 # written there); nothing written, the helper runs
 ver $I 99.000.000; sums $I >$T/img.sums
 inst39 inst4 STELLAPS5_HOST_MOUNTS="$IMNT"
-expect "grep -q 'a newer version is installed; this payload (1.0) left it as it is' $T/inst4.txt && ! grep -q 'can.t be written' $T/inst4.txt && grep -q 'listening on 127.0.0.1' $T/inst4.txt && sums $I | cmp -s - $T/img.sums && [ ! -e $M/hb2 ]" "the payload and an image with a newer version: says the app is newer, writes nothing, the helper runs"
-ver $I 01.000.000; sums $I >$T/img.sums
+expect "grep -q 'a newer version is installed; this payload ($VER) left it as it is' $T/inst4.txt && ! grep -q 'can.t be written' $T/inst4.txt && grep -q 'listening on 127.0.0.1' $T/inst4.txt && sums $I | cmp -s - $T/img.sums && [ ! -e $M/hb2 ]" "the payload and an image with a newer version: says the app is newer, writes nothing, the helper runs"
+ver $I $CVER; sums $I >$T/img.sums
 inst39 inst5 STELLAPS5_HOST_MOUNTS="$IMNT"
-expect "grep -q 'Stella PS5 1.0 is ready' $T/inst5.txt && ! grep -q 'can.t be written' $T/inst5.txt && sums $I | cmp -s - $T/img.sums && [ ! -e $M/hb2 ]" "... with this version: ready, nothing written"
+expect "grep -q 'Stella PS5 $VER is ready' $T/inst5.txt && ! grep -q 'can.t be written' $T/inst5.txt && sums $I | cmp -s - $T/img.sums && [ ! -e $M/hb2 ]" "... with this version: ready, nothing written"
 ver $I 00.900.000; sums $I >$T/img.sums
 inst39 inst6 STELLAPS5_HOST_MOUNTS="$IMNT"
 expect "grep -q 'runs from an image that ShadowMount+ mounted ($I): an update can.t be written into it' $T/inst6.txt && grep -q 'listening on 127.0.0.1' $T/inst6.txt && sums $I | cmp -s - $T/img.sums && [ ! -e $M/hb2 ]" "... with an older version: says it can't be written there, writes nothing, the helper runs"
@@ -1714,11 +1717,11 @@ expect "grep -q '\[update\] (from the helper) $SX/app/PPSA99927 is a nullfs moun
 # g. a backport's unionfs over ShadowMount+'s nullfs mount: the folder beneath is written directly, not through the layer
 rm -rf $SX/app/PPSA99927 && ln -s $U $SX/app/PPSA99927; ver $U 00.900.000
 inst39 inst8 STELLAPS5_HOST_MOUNTS="$SX/app/PPSA99927|nullfs|$U|rw;$M/usb0|exfatfs|/dev/da0s1|rw;$SX/app/PPSA99927|unionfs|$M/backport|rw"
-expect "grep -q \"$SX/app/PPSA99927 is a unionfs mount over a nullfs mount of $U (on $M/usb0, exfatfs, from /dev/da0s1): files go through $U\" $T/inst8.txt && grep -q '\"contentVersion\": \"01.000.000\"' $U/sce_sys/param.json && [ ! -e $M/hb2 ]" "a unionfs layer over the mount: the folder beneath written directly"
+expect "grep -q \"$SX/app/PPSA99927 is a unionfs mount over a nullfs mount of $U (on $M/usb0, exfatfs, from /dev/da0s1): files go through $U\" $T/inst8.txt && grep -q '\"contentVersion\": \"$CVER\"' $U/sce_sys/param.json && [ ! -e $M/hb2 ]" "a unionfs layer over the mount: the folder beneath written directly"
 # h. statfs fails: the mount table (getfsstat) says what is mounted; neither answering: nothing written
 ver $U 00.900.000
 inst39 inst10 STELLAPS5_HOST_NO_STATFS=1 STELLAPS5_HOST_MOUNTS="$MNT"
-expect "grep -q \"$SX/app/PPSA99927 is a nullfs mount of $U (on $M/usb0, exfatfs, from /dev/da0s1): files go through $SX/app/PPSA99927\" $T/inst10.txt && grep -q '\"contentVersion\": \"01.000.000\"' $U/sce_sys/param.json" "statfs failing: the mount table finds the mount"
+expect "grep -q \"$SX/app/PPSA99927 is a nullfs mount of $U (on $M/usb0, exfatfs, from /dev/da0s1): files go through $SX/app/PPSA99927\" $T/inst10.txt && grep -q '\"contentVersion\": \"$CVER\"' $U/sce_sys/param.json" "statfs failing: the mount table finds the mount"
 ver $U 00.900.000; sums $U >$T/u.sums
 inst39 inst11 STELLAPS5_HOST_NO_STATFS=1 STELLAPS5_HOST_NO_GETFSSTAT=1 STELLAPS5_HOST_MOUNTS="$MNT"
 expect "grep -q 'what is mounted on $SX/app/PPSA99927 can.t be read' $T/inst11.txt && sums $U | cmp -s - $T/u.sums && [ ! -e $M/hb2 ]" "neither statfs nor the mount table answering: nothing written, no second copy"
@@ -1726,21 +1729,21 @@ expect "grep -q 'what is mounted on $SX/app/PPSA99927 can.t be read' $T/inst11.t
 # /user/app/PPSA99927/mount.lnk is updated; a link to a folder not there: nothing; an image not mounted yet: ready
 rm -rf $SX/app/PPSA99927 $M/userapp && mkdir -p $M/userapp/PPSA99927 && echo "$U" >$M/userapp/PPSA99927/mount.lnk
 inst39 inst12 STELLAPS5_HOST_MOUNTS="$M/usb0|exfatfs|/dev/da0s1|rw"
-expect "grep -q 'updated to 1.0 (in $U, the copy ShadowMount+ runs)' $T/inst12.txt && grep -q '\"contentVersion\": \"01.000.000\"' $U/sce_sys/param.json && [ ! -e $M/hb2 ]" "no mount yet: the folder of ShadowMount+'s mount.lnk updated, no second copy"
+expect "grep -q 'updated to $VER (in $U, the copy ShadowMount+ runs)' $T/inst12.txt && grep -q '\"contentVersion\": \"$CVER\"' $U/sce_sys/param.json && [ ! -e $M/hb2 ]" "no mount yet: the folder of ShadowMount+'s mount.lnk updated, no second copy"
 echo "$M/gone/PPSA99927" >$M/userapp/PPSA99927/mount.lnk
 inst39 inst13
 expect "grep -q 'runs the app from $M/gone/PPSA99927, which isn.t there now' $T/inst13.txt && grep -q 'listening on 127.0.0.1' $T/inst13.txt && [ ! -e $M/hb2 ] && [ ! -e $M/gone ]" "... its folder not there (a drive not connected yet): nothing written, no second copy"
 echo "$M/shadowmnt/img2/PPSA99927" >$M/userapp/PPSA99927/mount.lnk
 inst39 inst15
-expect "grep -q 'Stella PS5 1.0 is ready' $T/inst15.txt && ! grep -q 'isn.t there now' $T/inst15.txt && [ ! -e $M/hb2 ] && [ ! -e $M/shadowmnt/img2 ]" "... a link to an image not mounted yet: ready, nothing written"
+expect "grep -q 'Stella PS5 $VER is ready' $T/inst15.txt && ! grep -q 'isn.t there now' $T/inst15.txt && [ ! -e $M/hb2 ] && [ ! -e $M/shadowmnt/img2 ]" "... a link to an image not mounted yet: ready, nothing written"
 echo "PPSA99927" >$M/userapp/PPSA99927/mount.lnk
 inst39 inst17
-expect "grep -q 'link holds \"PPSA99927\", not a folder.s path: ignored' $T/inst17.txt && grep -q 'Stella PS5 1.0 installed' $T/inst17.txt && [ -f $M/hb2/PPSA99927/eboot.bin ]" "... a link that isn't a path: ignored, installed in /data/homebrew"
+expect "grep -q 'link holds \"PPSA99927\", not a folder.s path: ignored' $T/inst17.txt && grep -q 'Stella PS5 $VER installed' $T/inst17.txt && [ -f $M/hb2/PPSA99927/eboot.bin ]" "... a link that isn't a path: ignored, installed in /data/homebrew"
 rm -rf $M/hb2 $M/userapp
 # j. extended storage on an LVD device but writable: not taken for an image; written
 mkdir -p $SX/app && rm -rf $SX/app/PPSA99927 && ln -s $U $SX/app/PPSA99927; ver $U 00.900.000
 inst39 inst14 STELLAPS5_HOST_MOUNTS="$SX/app/PPSA99927|nullfs|$U|rw;$M/usb0|ufs|/dev/lvd5|rw"
-expect "grep -q 'updated to 1.0 (in $U, the copy ShadowMount+ runs)' $T/inst14.txt && grep -q '\"contentVersion\": \"01.000.000\"' $U/sce_sys/param.json" "a writable folder on an LVD device: updated (not taken for an image)"
+expect "grep -q 'updated to $VER (in $U, the copy ShadowMount+ runs)' $T/inst14.txt && grep -q '\"contentVersion\": \"$CVER\"' $U/sce_sys/param.json" "a writable folder on an LVD device: updated (not taken for an image)"
 # k. the app doesn't read the mount table: statfs / getfsstat are only in the SDK's libkernel_sys, which a title can't
 # load (Media Player Classic PS5 1.5 imported it and crashed at launch, its #3; group 45 checks the eboot). It asks the
 # helper (c, e, f above). Without the helper's answer -- a helper that doesn't know the request (it closes the
@@ -1760,13 +1763,13 @@ app39k() { # pad, env...
 }
 KPAD="0:0;30:$TRIANGLE;32:0;40:$UP;42:0;46:$UP;48:0;56:$CROSS;58:0;100:$CROSS;102:0;120:$CIRCLE;122:0;$(SHELFQUIT_AT 200)"
 helper39 STELLAPS5_HOST_MOUNTS="$MNT" STELLAPS5_HOST_HELPER_OLD=1
-expect "$UPD check 1.0 --until available,failed | grep -q '^available|9.9|'" "k: a helper that doesn't know the request: 9.9 available"
+expect "$UPD check $VER --until available,failed | grep -q '^available|9.9|'" "k: a helper that doesn't know the request: 9.9 available"
 rc=$(app39k "0:0;30:$TRIANGLE;32:0;40:$UP;42:0;46:$UP;48:0;56:$CROSS;58:0;120:$CIRCLE;122:0;$(SHELFQUIT_AT 200)")
 waitfor $T/root/logs/helper.log 'PPSA99927 installed\|installed in'
 expect "[ $rc = 0 ] && grep -q \"\[update\] the helper didn't say where the app is: it closed the connection\" $T/root/logs/boot.log && grep -q \"\[update\] $SX/app/PPSA99927 shows the app (no mount table); ShadowMount+'s link: $U ($M/userapp/PPSA99927/mount.lnk)\" $T/root/logs/boot.log && ! grep -q \"can't be installed here\" $T/root/logs/boot.log" "... the app: ShadowMount+'s link, the same eboot.bin as the mount shows: taken, the update allowed"
 expect "grep -q 'eboot v9.9' $U/eboot.bin && grep -q '\"contentVersion\": \"99.000.000\"' $U/sce_sys/param.json" "... the helper installs it there"
 stop39
-# (the next starts don't say "9.9 was installed, but this is still 1.0")
+# (the next starts don't say "9.9 was installed, but this is still the old version")
 rm -f $T/root/update-pending.txt
 ver $U 00.900.000; echo "eboot usb old" >$U/eboot.bin; rm -f $U/manifest.sha256; sums $U >$T/u.sums
 # no helper to answer (that request goes to a port nobody listens on) and no ShadowMount+ link
@@ -1774,7 +1777,7 @@ rm -f $M/userapp/PPSA99927/mount.lnk
 (cd "$SRV" && exec python3 -m http.server $SPORT --bind 127.0.0.1 >/dev/null 2>&1) &
 sleep 0.5
 helper39 STELLAPS5_HOST_MOUNTS="$MNT"
-expect "$UPD check 1.0 --until available,failed | grep -q '^available|9.9|'" "k: 9.9 available"
+expect "$UPD check $VER --until available,failed | grep -q '^available|9.9|'" "k: 9.9 available"
 rc=$(app39k "$KPAD" STELLAPS5_HOST_APPPLACE_PORT=$((STELLAPS5_HELPER_PORT + 7)))
 stop39; cp $T/root/logs/boot.log $T/boot-k2.log
 expect "[ $rc = 0 ] && grep -q '\[update\] no helper on port .* to ask where the app is' $T/root/logs/boot.log && grep -q 'no ShadowMount+ link: not written' $T/root/logs/boot.log && grep -q \"can't be installed here: Stella PS5: the folder this copy runs from can't be told\" $T/root/logs/boot.log && sums $U | cmp -s - $T/u.sums" "... no helper's answer and no ShadowMount+ link: the app says it can't tell, nothing written"
@@ -1785,7 +1788,7 @@ echo "$O2" >$M/userapp/PPSA99927/mount.lnk
 (cd "$SRV" && exec python3 -m http.server $SPORT --bind 127.0.0.1 >/dev/null 2>&1) &
 sleep 0.5
 helper39 STELLAPS5_HOST_MOUNTS="$MNT" STELLAPS5_HOST_HELPER_OLD=1
-expect "$UPD check 1.0 --until available,failed | grep -q '^available|9.9|'" "k: 9.9 available"
+expect "$UPD check $VER --until available,failed | grep -q '^available|9.9|'" "k: 9.9 available"
 rc=$(app39k "$KPAD")
 stop39; cp $T/root/logs/boot.log $T/boot-k3.log
 expect "[ $rc = 0 ] && grep -q \"ShadowMount+'s link: $O2 .*: not the folder the mount shows\" $T/root/logs/boot.log && grep -q \"can't be installed here\" $T/root/logs/boot.log && sums $U | cmp -s - $T/u.sums && sums $O2 | cmp -s - $T/o2.sums" "... a link to another folder than the one shown (another eboot.bin): the app says it can't tell, nothing written"
@@ -1837,7 +1840,7 @@ rm -f $T/root/logs/boot.log $T/root/logs/helper.log
 	for i in $(seq 1 300); do grep -q 'not asked where the app is either' $T/root/logs/boot.log 2>/dev/null && break; sleep 0.1; done
 	kill $MUTE 2>/dev/null; wait $MUTE 2>/dev/null; sleep 0.3
 	helper39 STELLAPS5_HOST_MOUNTS="$MNT"
-	$UPD check 1.0 --until available,failed >/dev/null
+	$UPD check $VER --until available,failed >/dev/null
 ) &
 SWAP=$!
 rc=$(app39k "0:0;30:$TRIANGLE;32:0;40:$UP;42:0;46:$UP;48:0;56:$CROSS;58:0;120:$CIRCLE;122:0;$(SHELFQUIT_AT 200)")
@@ -2023,7 +2026,7 @@ helper44() { # the helper, with env ($@)
 }
 # a. a file that can't be put in place half way (param.json, after others): every old file put back
 helper44 STELLAPS5_HOST_UPDATE_FAIL_RENAME=sce_sys/param.json
-expect "$UPD check 1.0 --until available,failed | grep -q '^available|9.9|' && $UPD install 1.0 --until done,failed | grep -q \"^failed|.*Couldn't replace sce_sys/param.json .*the old version was put back\"" "a rename fails half way: the install says the old version was put back"
+expect "$UPD check $VER --until available,failed | grep -q '^available|9.9|' && $UPD install $VER --until done,failed | grep -q \"^failed|.*Couldn't replace sce_sys/param.json .*the old version was put back\"" "a rename fails half way: the install says the old version was put back"
 expect "sums | cmp -s - $T/before.sums" "... and it was: every file as before (no .new, .old or journal left)"
 stop_helpers
 # b. an install cut off half way (the console turned off): put back when the helper next starts
@@ -2044,7 +2047,7 @@ helper44
 expect "grep -q 'an install was cut off half way: the old version put back (3 file(s))' $T/root/logs/helper.log" "the next start: the interrupted install found"
 expect "sums | cmp -s - $T/before.sums" "... and the old version put back (the old eboot.bin, the added file gone, no journal)"
 # c. then the update installs, with no journal or old copies left
-expect "$UPD check 1.0 --until available,failed | grep -q '^available|9.9|' && $UPD install 1.0 --until done,failed | grep -q '^done|9.9|'" "then the update installs"
+expect "$UPD check $VER --until available,failed | grep -q '^available|9.9|' && $UPD install $VER --until done,failed | grep -q '^done|9.9|'" "then the update installs"
 expect "grep -q 'eboot v9.9' $H/eboot.bin && [ -f $H/sce_sys/extra.bin ] && [ -z \"\$(find $H -name '*.new' -o -name '*.old.*' -o -name 'update.journal*')\" ]" "... every file in place, nothing left behind"
 stop_helpers
 # d. a damaged journal (empty): nothing guessed, nothing installed, the payload repairs the app
@@ -2052,7 +2055,7 @@ stop_helpers
 echo "something" >$H/eboot.bin.old.9-9
 helper44
 expect "grep -q \"can't be read as a whole journal: left alone\" $T/root/logs/helper.log && grep -q 'its record is damaged' $T/helper.txt" "an empty journal: left alone, a notification says to send the payload"
-expect "$UPD check 1.0 --until available,failed | grep -q '^available|9.9|' && $UPD install 1.0 --until done,failed | grep -q \"^failed|.*An earlier update isn't finished\"" "... and no update installed over it"
+expect "$UPD check $VER --until available,failed | grep -q '^available|9.9|' && $UPD install $VER --until done,failed | grep -q \"^failed|.*An earlier update isn't finished\"" "... and no update installed over it"
 stop_helpers
 STELLAPS5_ROOT=$T/root STELLAPS5_HOMEBREW=$T/homebrew STELLAPS5_APPMETA=$T/appmeta ASAN_OPTIONS=detect_leaks=0 timeout 60 "$INSTALLER" >"$T/inst-repair.txt" 2>&1 &
 waitfor $T/inst-repair.txt 'listening on 127.0.0.1'
