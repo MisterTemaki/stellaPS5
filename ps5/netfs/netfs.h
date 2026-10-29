@@ -80,6 +80,11 @@ bool netfs_is_network_path(const char* path);
 void netfs_set_realtime(bool on);
 bool netfs_realtime();
 
+// Stella PS5 1.0.1 (diagnostics): while set, every path the wrapped libc calls are given (fopen, open, stat, lstat,
+// access, realpath, opendir) goes to this function too, with what was called -- the game's start logs the files the
+// cores touch. nullptr turns it off.
+void netfs_trace_files(void (*fn)(const char* call, const char* path));
+
 // ---- the Network screen: editing the shares file ----
 
 // An address line of the shares file, read again at each call (the file may have been edited over FTP).

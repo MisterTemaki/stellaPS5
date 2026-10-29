@@ -2007,6 +2007,11 @@ void EventHandler::setComboMap()
   const string serializedMapping = myOSystem.settings().getString("combomap");
   json mapping;
 
+  // Stella PS5: an empty mapping (the libretro port's settings) goes straight to the legacy conversion json::parse
+  // would throw it into: a game's start doesn't depend on an exception
+  if(serializedMapping.empty())
+    mapping = convertLegacyComboMapping(serializedMapping);
+  else
   try
   {
     mapping = json::parse(serializedMapping);

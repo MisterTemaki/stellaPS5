@@ -430,6 +430,33 @@ struct State
 };
 State g;
 
+// Stella PS5 1.0.1 (diagnostics): a game's start step by step -- the stage the crash report names, and with the debug
+// logs on one boot.log line each, put on the disk (fsync) before the step, so the last line survives anything that
+// takes the process down. Also the core's environment calls and every file the cores touch while it starts, up to
+// the third frame.
+int g_trace_frames = 0; // > 0: tracing, the frames still to trace
+#define EMU_STEP(where)                                                                                            \
+	do                                                                                                             \
+	{                                                                                                              \
+		STELLAPS5_STAGE(Emu, where);                                                                               \
+		if (g_trace_frames > 0 && OrbisLogEnabled())                                                               \
+		{                                                                                                          \
+			OrbisLog("[emu] step: %s", where);                                                                     \
+			OrbisLogSync();                                                                                        \
+		}                                                                                                          \
+	} while (0)
+
+void TraceFile(const char* call, const char* path)
+{
+	OrbisLog("[file] %s %s", call, path);
+}
+
+void TraceStart(bool on)
+{
+	g_trace_frames = on ? 3 : 0;
+	netfs_trace_files(on && OrbisLogEnabled() ? TraceFile : nullptr);
+}
+
 int Sys()
 {
 	return int(g.system);
@@ -455,6 +482,9 @@ void CoreLog(enum retro_log_level level, const char* fmt, ...)
 
 bool Environment(unsigned cmd, void* data)
 {
+	if (g_trace_frames > 0 && OrbisLogEnabled() && cmd != RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE && cmd != RETRO_ENVIRONMENT_GET_VARIABLE)
+		OrbisLog("[emu] environment %u%s", cmd & ~RETRO_ENVIRONMENT_EXPERIMENTAL,
+			cmd & RETRO_ENVIRONMENT_EXPERIMENTAL ? " (experimental)" : "");
 	switch (cmd)
 	{
 		case RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY:
@@ -948,13 +978,17 @@ void StartCore(fe::System s)
 	g.core = &c;
 	if (g.core_inited[size_t(s)])
 		return;
+	EMU_STEP("core: retro_set_environment");
 	c.set_environment(Environment);
+	EMU_STEP("core: the other callbacks");
 	c.set_video_refresh(Video);
 	c.set_audio_sample(AudioSample);
 	c.set_audio_sample_batch(AudioBatch);
 	c.set_input_poll(InputPoll);
 	c.set_input_state(InputState);
+	EMU_STEP("core: retro_init");
 	c.init();
+	EMU_STEP("core: retro_get_system_info");
 	retro_system_info info = {};
 	c.get_system_info(&info);
 	OrbisLog("[emu] %s %s ready for the %s (libretro API %u; extensions %s)", info.library_name, info.library_version,
@@ -1089,8 +1123,10 @@ bool LoadGame(const std::string& path, std::string* error)
 {
 	if (!g.inited)
 		return false;
-	STELLAPS5_STAGE(Emu, "load game");
+	TraceStart(true);
+	EMU_STEP("load game: close the last one");
 	CloseGame();
+	EMU_STEP("load game: read the file");
 	const std::string file = path.substr(path.find_last_of('/') + 1);
 	std::string ext = ExtOf(path);
 	g.path = path;
@@ -1103,6 +1139,7 @@ bool LoadGame(const std::string& path, std::string* error)
 	std::string inner;
 	bool too_big = false;
 	auto fail = [&](const std::string& why) {
+		TraceStart(false);
 		if (error)
 			*error = why;
 		netfs_end_game();
@@ -1133,6 +1170,7 @@ bool LoadGame(const std::string& path, std::string* error)
 	}
 	else if (fe::IsArchiveExt(ext))
 	{
+		EMU_STEP("load game: unpack the archive");
 		std::string why;
 		uint64_t too_big_size = 0;
 		if (!fe::ReadFromArchive(path, &inner, &g.rom, &why, nullptr, nullptr, &too_big_size))
@@ -1152,6 +1190,7 @@ bool LoadGame(const std::string& path, std::string* error)
 		return fail(Fmt(fe::T("Stella PS5 could not read %s."), file.c_str()));
 	}
 	g.inner = inner;
+	EMU_STEP("load game: which system");
 	const std::string game_file = inner.empty() ? file : inner.substr(inner.find_last_of('/') + 1);
 	g.system = fe::SystemOfRom(path, game_file, g.rom);
 	// each system's own limit, the same as for the archives and the naming (fe::MaxRomSize)
@@ -1200,7 +1239,9 @@ bool LoadGame(const std::string& path, std::string* error)
 	// Stella reads the game's name (its default title) and extension (a ".f8", ".e0"... extension names the
 	// bankswitching) from the path: a game in an archive goes by its name inside
 	g.core_path = inner.empty() ? g.path : g.dir + "/" + game_file;
+	EMU_STEP("load game: start the core");
 	StartCore(g.system);
+	EMU_STEP("load game: settings");
 
 	retro_game_info gi = {};
 	gi.path = g.core_path.c_str();
@@ -1229,13 +1270,16 @@ bool LoadGame(const std::string& path, std::string* error)
 	g.in.clear();
 	g.mute = false;
 	g.pixel_format = RETRO_PIXEL_FORMAT_0RGB1555;
+	EMU_STEP("core: retro_load_game");
 	if (!g.core->load_game(&gi))
 	{
 		OrbisLog("[emu] could not start %s", path.c_str());
 		return fail(Fmt(fe::T("%s could not start %s (not a game it knows, or a damaged file)."), g.core->name, file.c_str()));
 	}
+	EMU_STEP("core: retro_set_controller_port_device");
 	for (unsigned port = 0; port < 4; port++)
 		g.core->set_controller_port_device(port, RETRO_DEVICE_JOYPAD);
+	EMU_STEP("core: retro_get_system_av_info");
 	retro_system_av_info av = {};
 	g.core->get_system_av_info(&av);
 	g.fps = av.timing.fps > 1 ? av.timing.fps : 60.0;
@@ -1262,13 +1306,17 @@ bool LoadGame(const std::string& path, std::string* error)
 	g.stats_reports = 0;
 	g.next_sram_check = Now() + 3.0;
 	g.overlay_was_drawn = false;
+	EMU_STEP("load game: video");
 	RewindClear();
 	ps5video::InvalidateFrame();
+	EMU_STEP("load game: save folders, the cartridge's save");
 	OrbisMkdirs(SaveDir("states"));
 	OrbisMkdirs(SaveDir("saves"));
 	LoadSram();
+	EMU_STEP("load game: the palette");
 	g.palette_frames = 3;
 	ApplyPalette();
+	EMU_STEP("load game: started");
 	// realtime from here: the game was read whole above (from a share too); the naming pass of the shelf stops
 	// (netfs_realtime) while a game runs
 	netfs_set_realtime(true);
@@ -1649,6 +1697,15 @@ FrameResult RunFrame()
 	}
 
 	// -- emulate
+	if (g_trace_frames > 0)
+	{
+		EMU_STEP("core: retro_run (one of the first three frames)");
+		if (--g_trace_frames == 0)
+		{
+			OrbisLog("[emu] step: the first frames ran");
+			TraceStart(false);
+		}
+	}
 	STELLAPS5_STAGE(Emu, "retro_run");
 	if (g.rewinding)
 	{

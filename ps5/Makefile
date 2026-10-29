@@ -351,14 +351,20 @@ $(PS5_OUT)/symbols.ok: $(PS5_CORE_OBJ) $(PS5_CORES_OBJ) $(PS5_EMU_OBJ) tools/che
 	python3 tools/check_core_symbols.py $(PS5_PAYLOAD_SDK)/bin/llvm-nm $@ \
 		$(call CHECK_GROUPS,$(filter %.o,$(PS5_CORE_OBJ)) $(filter %/bridge/frontend/fe_stella.o,$(PS5_EMU_OBJ)),$(PS5_OUT),$(filter-out %/bridge/frontend/fe_stella.o,$(PS5_EMU_OBJ)))
 
+# The C++ runtime is the eboot's own, whole: libc++, libc++abi (__cxa_throw, the personality routine, the type_info
+# vtables) and libunwind (which finds the FDEs through ehframe.ld's __eh_frame_hdr_start...), named before the system
+# stubs. After them, libSceLibcInternal's stub won the personality routine, __cxa_get_globals and the type_info / std
+# exception vtables: a throw from the static __cxa_throw / libunwind then ran the system's personality on our unwinder's
+# context and jumped into an LSDA -- Stella 1.0 crashed starting any 2600 game (EventHandler's first throw, caught as
+# usual on the host). tools/check_imports.py refuses any C++ runtime import.
 build/app/stella-pie.elf: $(PS5_OUT)/symbols.ok $(EBOOT_OBJS) $(NATIVE)/tooling/native/ps5-pie.ld $(NATIVE)/tooling/native/ehframe.ld \
 		$(NATIVE)/tooling/native/app-symbols.map $(NATIVE)/tooling/native/localize.map $(PS5_OUT)/lzma7z/names.ok
 	$(LLD) -m elf_x86_64 -pie -z max-page-size=0x4000 --hash-style=gnu \
 		-T $(NATIVE)/tooling/native/ps5-pie.ld -T $(NATIVE)/tooling/native/ehframe.ld --eh-frame-hdr \
 		--version-script $(NATIVE)/tooling/native/app-symbols.map --version-script $(NATIVE)/tooling/native/localize.map \
 		-e _start --no-dynamic-linker $(NETFS_WRAP_LLD) -o $@ $(EBOOT_OBJS) \
-		--as-needed $(APP_STUBS) -L $(SDK_LIB) \
-		$(SDK_LIB)/libc++.a $(SDK_LIB)/libc++abi.a $(SDK_LIB)/libunwind.a $(SDK_LIB)/libc.a -lpthread
+		$(SDK_LIB)/libc++.a $(SDK_LIB)/libc++abi.a $(SDK_LIB)/libunwind.a \
+		--as-needed $(APP_STUBS) -L $(SDK_LIB) $(SDK_LIB)/libc.a -lpthread
 	python3 tools/check_imports.py $@ $(SDK_LIB) || { rm -f $@; exit 1; }
 
 build/app/eboot.elf: build/app/stella-pie.elf $(NATIVE_TOOL)

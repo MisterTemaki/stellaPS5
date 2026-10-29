@@ -36,6 +36,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <pthread.h>
+#include <stdexcept>
 #include <string>
 #include <unistd.h>
 
@@ -192,6 +193,47 @@ void AutoCheckUpdates()
 	}
 }
 
+// Stella PS5 1.0.1: C++ exceptions checked at the start, with the debug logs on: one throw from our code and one from
+// inside libc++ (std::stoi), each caught by type. 1.0's eboot took the personality routine and the type_info vtables
+// from the system's libSceLibcInternal next to its own static unwinder, and the first throw (Stella's, when a 2600 game
+// started) crashed; boot.log says "exceptions: ok" when they work (a crash here names this stage).
+__attribute__((noinline)) int ThrowForSelfTest(int v)
+{
+	if (v > 0)
+		throw std::runtime_error("self-test");
+	return v;
+}
+
+void ExceptionSelfTest()
+{
+	if (!OrbisLogEnabled())
+		return;
+	STELLAPS5_STAGE(Boot, "exceptions self-test");
+	OrbisLog("[boot] exceptions: self-test (a throw and its catch)");
+	OrbisLogSync();
+	volatile int one = 1;
+	bool ours = false, libcxx = false;
+	try
+	{
+		ThrowForSelfTest(one);
+	}
+	catch (const std::runtime_error& e)
+	{
+		ours = strcmp(e.what(), "self-test") == 0;
+	}
+	try
+	{
+		volatile int n = std::stoi(std::string(one ? "not a number" : "1"));
+		(void)n;
+	}
+	catch (const std::invalid_argument&)
+	{
+		libcxx = true;
+	}
+	OrbisLog("[boot] exceptions: %s (our throw %s, libc++'s std::invalid_argument %s)", ours && libcxx ? "ok" : "NOT OK",
+		ours ? "caught" : "missed", libcxx ? "caught" : "missed");
+}
+
 int Run(int argc, char** argv)
 {
 	setvbuf(stdout, nullptr, _IOLBF, 0);
@@ -211,6 +253,7 @@ int Run(int argc, char** argv)
 	OrbisLog("[boot] jailbreak: %s", freed ? how.c_str() : "nobody answered");
 	const bool have_data = OrbisPathsInit();
 	OrbisLogOpen(); // also writes the lines above
+	ExceptionSelfTest();
 	fe::SavePrefetched(prefetch);
 	fe::RememberPrefetch(prefetch);
 	// the shelf downloads nothing after the jailbreak (PS5SX2's download_usb_only); without one (the host

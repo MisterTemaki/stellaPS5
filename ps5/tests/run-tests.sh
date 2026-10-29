@@ -78,6 +78,8 @@ expect "grep -qE 'Stella: \"test\", md5 [0-9a-f]{32}, NTSC( \*)?, bankswitching 
 expect "grep -q 'picture 160x228 (228 lines, aspect 1.4035, Fit to screen)' $T/root/logs/boot.log" "Stella's TV picture (160x228, its double-width pixels), fit to the screen"
 expect "[ -f $T/root/states/Atari2600/test.state1 ] && grep -q 'save state 1: ok' $T/root/logs/boot.log" "L2 + Up wrote states/Atari2600/test.state1"
 expect "grep -q 'cores: Stella (Atari 2600), a5200 (Atari 5200), ProSystem (Atari 7800), Gearlynx (Atari Lynx)' $T/root/logs/boot.log" "the four cores are built in"
+expect "grep -q '\[boot\] exceptions: ok (our throw caught, libc++.s std::invalid_argument caught)' $T/root/logs/boot.log" "the start checks C++ exceptions (debug logs on): ok"
+expect "grep -q '\[emu\] step: core: retro_load_game' $T/root/logs/boot.log && grep -q '\[emu\] step: the first frames ran' $T/root/logs/boot.log && grep -q '\[file\] fopen .*test.a26' $T/root/logs/boot.log && grep -q '\[emu\] environment ' $T/root/logs/boot.log" "a game's start logged step by step (the core's calls, its environment calls, the files), up to the third frame"
 nosan "$T"
 fi
 
@@ -2066,6 +2068,19 @@ if [ -f build/app/stella-pie.elf ] && [ -d "$SDKLIB" ]; then
 	python3 tools/check_imports.py build/app/stella-pie.elf "$SDKLIB" >"$WORK/imports.txt" 2>&1
 	rc=$?
 	expect "[ $rc = 0 ] && grep -q '^check_imports: ok' $WORK/imports.txt && ! grep -q 'libkernel_sys\|libkernel_web' $WORK/imports.txt" "the app's PIE (build/app/stella-pie.elf): only allowed modules, every import found in one of them"
+	# exceptions in the eboot: its own personality routine, which its .eh_frame names (through a GOT slot relocated to
+	# it, not an import), and the bounds libunwind finds the FDEs by (ehframe.ld)
+	if command -v llvm-dwarfdump-18 >/dev/null && command -v llvm-readelf-18 >/dev/null; then
+		P=build/app/stella-pie.elf
+		pers=$(llvm-readelf-18 -sW $P | awk '$NF=="__gxx_personality_v0" && $2 != "0000000000000000" {print $2}' | sed 's/^0*//' | head -1)
+		slots=$(llvm-dwarfdump-18 --eh-frame $P 2>/dev/null | awk '/Personality Address/ {print $3}' | sed 's/^0*//' | sort -u)
+		hdr=$(llvm-readelf-18 -SW $P | awk '$2==".eh_frame_hdr" {print $4}' | sed 's/^0*//')
+		ok=1
+		[ -n "$pers" ] && [ -n "$slots" ] || ok=0
+		for s in $slots; do llvm-readelf-18 -rW $P | grep -qi "^0*$s .*R_X86_64_RELATIVE *0*$pers\$" || ok=0; done
+		llvm-readelf-18 -sW $P | awk '$NF=="__eh_frame_hdr_start" {print $2}' | grep -qi "0*$hdr\$" || ok=0
+		expect "[ $ok = 1 ]" "the eboot's exceptions: its own __gxx_personality_v0 (0x$pers), every CIE's personality slot ($(echo $slots | tr ' ' ,)) relocated to it, __eh_frame_hdr_start = .eh_frame_hdr"
+	fi
 else
 	echo "  (skipped: build/app/stella-pie.elf or the SDK isn't there -- make ps5 first)"
 fi
@@ -2080,6 +2095,13 @@ if [ -d "$SDKLIB" ] && command -v ld.lld >/dev/null && command -v clang >/dev/nu
 	rc=$?
 	expect "[ $rc = 1 ] && grep -q 'NEEDED libkernel_sys.sprx: not a module the app may load' $WORK/imp/out.txt && grep -q 'import statfs: not in an allowed module (only in libkernel_sys.so)' $WORK/imp/out.txt" "a PIE importing statfs: refused, naming libkernel_sys"
 	# and the app's link leaves libkernel_sys / libkernel_web out: such a symbol doesn't link at all
+	# a PIE taking the C++ runtime's personality routine from the system (Stella PS5 1.0's crash starting a game): refused
+	printf 'extern char __gxx_personality_v0;\nvoid* p = &__gxx_personality_v0;\nint _start(void) { return p != 0; }\n' >"$WORK/imp/cxx.c"
+	clang -fPIC -c -o "$WORK/imp/cxx.o" "$WORK/imp/cxx.c" &&
+		ld.lld -pie --no-dynamic-linker -e _start -o "$WORK/imp/cxx.elf" "$WORK/imp/cxx.o" --as-needed "$SDKLIB/libkernel.so" "$SDKLIB/libSceLibcInternal.so"
+	python3 tools/check_imports.py "$WORK/imp/cxx.elf" "$SDKLIB" >"$WORK/imp/cxx.txt" 2>&1
+	rc=$?
+	expect "[ $rc = 1 ] && grep -q 'import __gxx_personality_v0: the C++ runtime .* must be the eboot.s own' $WORK/imp/cxx.txt" "a PIE importing the C++ personality routine from the system: refused"
 	make -s --eval 'print-app-stubs: ; @echo $(APP_STUBS)' print-app-stubs >"$WORK/imp/stubs.txt" 2>&1
 	expect "grep -q '/libkernel.so' $WORK/imp/stubs.txt && ! grep -q 'libkernel_sys\|libkernel_web' $WORK/imp/stubs.txt" "the app's link takes no libkernel_sys / libkernel_web stub (such a symbol doesn't link at all)"
 else

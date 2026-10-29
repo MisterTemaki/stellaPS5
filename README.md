@@ -30,12 +30,12 @@ PS5 and Snes9x PS5, the ports it comes from:
 
 Everything outside `ps5/` is **Stella 7.0** (tag `7.0`, commit `d55b1aec0d067a4c901a6dcdf81cb8f579685659`), as the
 repository's first commit has it, apart from this README (Stella's own is [README-Stella.md](README-Stella.md)) and
-**three small changes** in Stella's libretro port, each marked `Stella PS5:` (see [Building](#building)). The emulator (`src/emucore`,
+**five small changes** to Stella (three in its libretro port, two in its core), each marked `Stella PS5:` (see [Building](#building)). The emulator (`src/emucore`,
 `src/common`) and its libretro port (`src/os/libretro`) are compiled from the port's own source list. The frontend
 drives the cores through their libretro interface and plays the part RetroArch plays on a PC.
 
 > **Status (1.0):** builds with the ps5-payload-dev SDK into a signed native app (`eboot.bin`) and its payload, and
-> passes 571 host tests (with netfs's 235 checks, the 7z reader's 43, the NFS backend's and the tabs' unit tests), which
+> passes 575 host tests (with netfs's 235 checks, the 7z reader's 43, the NFS backend's and the tabs' unit tests), which
 > run the same code -- the four cores included -- on Linux
 > with the PS5 calls simulated: test programs written for this port (a 2600 game that shows on screen which inputs
 > and switches it sees, a 5200, a 7800 and a Lynx program) are played through the whole chain -- the shelf, the pad,
@@ -474,7 +474,9 @@ Settings -> **SYSTEM** -> **Debug logs** (off by default; `debug_logs=1` in `ste
 the installer and the helper write `boot.log`, `installer.log` and `helper.log` in `/data/stella/logs/` (and keep the
 previous session's `.prev.log`): the sandbox request, the covers, the video setup, the controller, the games found and
 their names, the core chosen for each game and what Stella detected (format, bankswitching, controllers, switches),
-missing BIOS files, frames per second and the sound queue every minute. If the app dies on a signal, a `== CRASH ==`
+missing BIOS files, frames per second and the sound queue every minute; at the start, whether C++ exceptions work
+(`[boot] exceptions: ok`); and each step of a game's start (`[emu] step: ...`, each put on the disk before it runs),
+the core's environment calls and every file the cores open or look at, up to the third frame. If the app dies on a signal, a `== CRASH ==`
 block is written at the end of `boot.log` (the signal, the stage each part was in, the return addresses, which map into
 `ps5/build/app/stella-pie.elf`). Send these files when reporting a problem.
 
@@ -506,14 +508,14 @@ make ps5 -j$(nproc)              # build/ps5/StellaPS5.elf (installer + helper, 
 make send PS5_HOST=192.168.0.10  # sends it to elfldr (port 9021)
 make dist                        # build/dist/StellaPS5-v<version>.elf, StellaPS5-v<version>-PPSA99927.zip, the source zip
 make app                         # only build/app/PPSA99927/, to copy by hand
-make test                        # Linux builds (app, installer, helper) + the 571 host tests (ASan/UBSan), with netfs's,
+make test                        # Linux builds (app, installer, helper) + the 575 host tests (ASan/UBSan), with netfs's,
                                  # the NFS backend's, the tabs' and the 7z reader's unit tests
 ```
 
 - **Stella** is built from its libretro port's own source list (`src/os/libretro/Makefile.common`'s `SOURCES_CXX`)
   with that port's flags (`-D__LIB_RETRO__ -DSOUND_SUPPORT`, C++20), but `libretro.cxx` itself, which
   `ps5/frontend/fe_stella.cxx` compiles inside the bridge to Stella's own API (the console's switches, the palette,
-  Stella's database, what it detected). **Three changes to Stella's libretro port**, each marked `Stella PS5:`:
+  Stella's database, what it detected). **Five changes to Stella**, each marked `Stella PS5:`:
   - `StellaLIBRETRO::destroy()` forgets its cached pointer to the TIA's surface (`render_surface = nullptr;`,
     `src/os/libretro/StellaLIBRETRO.cxx`): without it, a second game in the same session -- going back to the list
     and starting one, or a power cycle -- drew from freed memory (RetroArch loads the core anew for every game, so it
@@ -523,10 +525,24 @@ make test                        # Linux builds (app, installer, helper) + the 5
   - `SoundLIBRETRO::dequeue()` takes the size of the buffer it fills and stops there (`SoundLIBRETRO.hxx`, and the call
     in `StellaLIBRETRO.cxx`): such a file's long frames queued more sound than the buffer holds.
   The last two were found by fuzzing the app with odd files.
+  - `EventHandler::setComboMap()` (`src/emucore/EventHandler.cxx`) converts an empty combo mapping (the libretro
+    port's) directly instead of letting `json::parse` throw and catching it, and `PropertiesSet::loadPerROM()`
+    (`src/emucore/PropsSet.cxx`) doesn't look for a per-ROM properties file under libretro (its file node says every
+    path exists; reading that one threw "File open/read error", caught). Both throws were caught as usual, but a 2600
+    game's start no longer depends on an exception: Stella PS5 1.0's eboot couldn't unwind one (below).
 - **a5200, ProSystem, Gearlynx** (`ps5/third_party/cores`, unchanged) are built from their libretro builds' source lists, with
   their libretro entry points prefixed and every other name kept inside the core (`ps5/cores.mk`,
   [their README](ps5/third_party/cores/README.md)); `tools/check_core_symbols.py` stops the build if two parts of the
   eboot define one name.
+- **C++ exceptions in the eboot:** the C++ runtime is the eboot's own, whole -- libc++, libc++abi (`__cxa_throw`,
+  the personality routine, the `type_info` vtables) and libunwind (which finds the FDEs through `ehframe.ld`'s
+  `__eh_frame_hdr_start`...) are linked before the system stubs. In 1.0 they came after, so libSceLibcInternal's stub
+  supplied the personality routine, `__cxa_get_globals` and the `type_info` / std exception vtables while
+  `__cxa_throw` and the unwinder were static: the first throw (Stella's, starting any 2600 game) ran the system's
+  personality routine on the static unwinder's context and the app crashed (a SIGSEGV with rip in an exception
+  table). `tools/check_imports.py` now refuses any imported C++ runtime symbol, group 45 checks that every CIE's
+  personality slot is relocated to the eboot's own routine, and with the debug logs on the app checks a throw and
+  its catch at the start (`boot.log`: `[boot] exceptions: ok`).
 - `eboot.bin` is a PIE linked against the SDK's stubs and static libc++, then `ps5-native-tool link` and
   `self --sign`, exactly like PS5SX2's `link-vk.sh`; `libc.prx` goes with it.
 - `tools/make_gamedb.py` makes `frontend/data/nointro.tsv` from libretro-database; `tools/make_art.py` the home-screen

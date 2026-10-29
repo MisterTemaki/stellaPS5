@@ -154,7 +154,13 @@ void PropertiesSet::loadPerROM(const FSNode& rom, string_view md5)
   // First, does this ROM have a per-ROM properties entry?
   // If so, load it into the database
   const FSNode propsNode(rom.getPathWithExt(".pro"));
+#ifdef __LIB_RETRO__
+  // Stella PS5: the libretro port has no per-ROM properties file (its FSNode says every path exists, and reading this
+  // one threw "File open/read error", caught): not looked for, so a game's start doesn't depend on an exception
+  if (false) {
+#else
   if (propsNode.exists()) {
+#endif
     KeyValueRepositoryPropertyFile repo(propsNode);
     props.load(repo);
 

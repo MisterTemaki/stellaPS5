@@ -24,6 +24,21 @@
 
 using namespace netfs;
 
+namespace
+{
+void (*volatile g_trace)(const char*, const char*) = nullptr;
+inline void Trace(const char* call, const char* path)
+{
+	if (void (*fn)(const char*, const char*) = g_trace)
+		fn(call, path ? path : "(null)");
+}
+} // namespace
+
+void netfs_trace_files(void (*fn)(const char* call, const char* path))
+{
+	g_trace = fn;
+}
+
 extern "C"
 {
 FILE* __real_fopen(const char*, const char*);
@@ -64,6 +79,7 @@ int __real_closedir(DIR*);
 
 FILE* __wrap_fopen(const char* path, const char* mode)
 {
+	Trace("fopen", path);
 	FILE* f;
 	if (netfs_is_network_path(path) && vfs::Fopen(path, mode, f))
 		return f;
@@ -72,6 +88,7 @@ FILE* __wrap_fopen(const char* path, const char* mode)
 
 int __wrap_open(const char* path, int flags, ...)
 {
+	Trace("open", path);
 	int fd;
 	if (netfs_is_network_path(path) && vfs::Open(path, flags, fd))
 		return fd;
@@ -88,6 +105,7 @@ int __wrap_open(const char* path, int flags, ...)
 
 int __wrap_stat(const char* path, struct stat* st)
 {
+	Trace("stat", path);
 	int rc;
 	if (netfs_is_network_path(path) && vfs::Stat(path, st, rc))
 		return rc;
@@ -96,6 +114,7 @@ int __wrap_stat(const char* path, struct stat* st)
 
 int __wrap_lstat(const char* path, struct stat* st)
 {
+	Trace("lstat", path);
 	int rc;
 	if (netfs_is_network_path(path) && vfs::Stat(path, st, rc))
 		return rc;
@@ -104,6 +123,7 @@ int __wrap_lstat(const char* path, struct stat* st)
 
 int __wrap_access(const char* path, int mode)
 {
+	Trace("access", path);
 	int rc;
 	if (netfs_is_network_path(path) && vfs::Access(path, mode, rc))
 		return rc;
@@ -112,6 +132,7 @@ int __wrap_access(const char* path, int mode)
 
 char* __wrap_realpath(const char* path, char* resolved)
 {
+	Trace("realpath", path);
 	char* r;
 	if (netfs_is_network_path(path) && vfs::Realpath(path, resolved, r))
 		return r;
@@ -120,6 +141,7 @@ char* __wrap_realpath(const char* path, char* resolved)
 
 DIR* __wrap_opendir(const char* path)
 {
+	Trace("opendir", path);
 	DIR* d;
 	if (netfs_is_network_path(path) && vfs::Opendir(path, d))
 		return d;
@@ -382,6 +404,7 @@ int64_t __real_ftello64(FILE*);
 
 FILE* __wrap_fopen64(const char* path, const char* mode)
 {
+	Trace("fopen64", path);
 	FILE* f;
 	if (netfs_is_network_path(path) && vfs::Fopen(path, mode, f))
 		return f;

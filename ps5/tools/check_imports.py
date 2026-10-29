@@ -10,7 +10,10 @@
 # - a NEEDED module isn't one of those the app is allowed (the system modules a title loads: the video and sound
 #   output, the pad, the user and system services, the network, HTTP and SSL for the covers; never libkernel_sys or
 #   libkernel_web);
-# - an imported symbol isn't defined by the stub of an allowed module (e.g. one only libkernel_sys / libkernel_web has).
+# - an imported symbol isn't defined by the stub of an allowed module (e.g. one only libkernel_sys / libkernel_web has);
+# - a C++ runtime symbol (__cxa_* but __cxa_atexit, __gxx_personality_v0, _Unwind_*, any _Z name such as a type_info
+#   vtable) is imported instead of linked in: mixed with the static unwinder it breaks every throw (Stella PS5 1.0's
+#   crash starting a game).
 # It prints the NEEDED list and how many symbols come from each module.
 import os
 import subprocess
@@ -29,6 +32,10 @@ ALLOWED = [
     "libSceHttp2.sprx",
     "libSceSsl.sprx",
 ]
+
+
+# C runtime pieces the system's libc provides (not part of the exception ABI)
+CXA_FROM_LIBC = {"__cxa_atexit", "__cxa_finalize", "__cxa_thread_atexit", "__cxa_thread_atexit_impl"}
 
 
 def run(*cmd):
@@ -89,6 +96,12 @@ def main():
             others = {f: defined(os.path.join(sdk, f)) for f in sorted(os.listdir(sdk)) if f.endswith(".so")}
         where = [f for f, names in others.items() if sym in names]
         errors.append("import %s: not in an allowed module (only in %s)" % (sym, ", ".join(where) or "no SDK stub"))
+    # the C++ runtime must be the eboot's own, whole (Makefile): a personality routine, __cxa_* or type_info vtable from
+    # the system's libSceLibcInternal next to the static __cxa_throw / libunwind breaks every throw (Stella PS5 1.0)
+    for sym in sorted(undefined(elf)):
+        if (sym.startswith(("_Z", "__gxx_", "_Unwind_")) or (sym.startswith("__cxa_") and sym not in CXA_FROM_LIBC)):
+            errors.append("import %s: the C++ runtime (exceptions, type_info, std classes) must be the eboot's own, "
+                          "not a system module's" % sym)
     print("check_imports: imports by module: " + ", ".join("%s %d" % (m, n) for m, n in count.items()))
     for e in errors:
         print("check_imports: ERROR: " + e)
