@@ -42,7 +42,8 @@ drives the cores through their libretro interface and plays the part RetroArch p
 > and switches it sees, a 5200, a 7800 and a Lynx program) are played through the whole chain -- the shelf, the pad,
 > the core, the video and sound output --, from zips, `.7z` archives and a simulated network share. **1.0 ran on a
 > PS5** (the shelf, the covers, the menus) **but crashed starting a game**; **with 1.0.1 a 2600 game (River Raid) starts
-> and plays on a PS5** (tested by the author before release). See [Known limitations](#known-limitations) for what
+> and plays on a PS5** (tested by the author before release), and **1.0.2 was run on a PS5 before release** (the
+> app opens and games play, with the exceptions check passing). See [Known limitations](#known-limitations) for what
 > hasn't been tried on a console yet. If something
 > fails, the logs in `/data/stella/logs/` say where.
 
